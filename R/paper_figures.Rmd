@@ -1,0 +1,1767 @@
+---
+title: "paper figures"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE, dev=c('pdf'))
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(cowplot)
+library(ggrepel)
+library(dplyr)
+library(scRepertoire)
+library(tidyr)
+library(ggalluvial)
+library(plyr)
+library(DESeq2)
+library(ComplexHeatmap)
+library(broom)
+library(purrr)
+library(gtools)
+library(ggpubr)
+
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+get data
+
+- 9 samples from us
+- 2 samples (multiplexed with multiple donors from [Sureshchandra et al.](https://insight.jci.org/articles/view/153201))
+- 18 samples from [Wang et al.](https://doi.org/10.1002/jmv.28012)
+- 7 HD and 4 ASCT samples w/o vaccination from [Obermayer et al.](https://doi.org/10.3389/fimmu.2023.1114368) 
+
+```{r get_data}
+libraries <- c("P1-T1","P1-T2","P1-T3","P2-T1","P2-T2","P2-T3","P3-T1","P3-T2","P3-T3",
+             "Vacc_pre","Vacc_post",
+             c(outer(c('NJ-','FJ-','SJ-'),seq(1,6),FUN=paste0)),
+             c("D10post","D10pre","D16post","D16pre","D26post","D26pre","D29post",
+               "R10d180","R16d180","R26d180","R29d180"))
+datasets <- c(rep('ASCT', 9),
+              rep('HD1', 2),
+              rep('HD2', 18),
+              rep('HD_C',9),
+              rep('ASCT_C',6))
+names(datasets) <- libraries
+pbmc <- lapply(libraries, function(lib) readRDS(file.path('seurat',paste0(lib,'.rds'))))
+names(pbmc) <- libraries
+
+for (lib in libraries) {
+  pbmc[[lib]]$pct.ribo <- PercentageFeatureSet(pbmc[[lib]], pattern='^RP[SL][0-9]*$')
+  pbmc[[lib]]$celltype <- ifelse(pbmc[[lib]]$predicted.celltype.l1 %in% c('B','CD4 T','CD8 T'),
+                                    pbmc[[lib]]$predicted.celltype.l2,
+                                    pbmc[[lib]]$predicted.celltype.l1)
+  pbmc[[lib]]$celltype <- gsub('group_[AB]','CD8 T VI', pbmc[[lib]]$celltype)
+  if (datasets[[lib]]=='ASCT') {
+    pbmc[[lib]]$dataset <- datasets[[lib]]
+    pbmc[[lib]]$sample <- pbmc[[lib]]$orig.ident
+    pbmc[[lib]]$stage <- plyr::revalue(factor(gsub('P[0-9]-','',pbmc[[lib]]$orig.ident),levels=c('T1','T2','T3')),
+                                       c('T1'='T0','T2'='T1','T3'='T2'))
+    pbmc[[lib]]$donor <- plyr::revalue(gsub('-T[0-9]','',pbmc[[lib]]$orig.ident),c('P2'='ASCT3','P1'='ASCT2','P3'='ASCT1'))
+  } else if (datasets[[lib]]=='HD2') {
+    pbmc[[lib]]$dataset <- datasets[[lib]]
+    pbmc[[lib]]$sample <- pbmc[[lib]]$orig.ident
+    pbmc[[lib]]$stage <- plyr::revalue(factor(gsub('J-.*','',pbmc[[lib]]$orig.ident), levels=c('N','F','S')),
+                                       c('N'='T0','F'='T1','S'='T2'))
+    pbmc[[lib]]$donor <- gsub('[NFSJ]*-','D',pbmc[[lib]]$orig.ident)
+  } else if (datasets[[lib]]=='HD1') {
+    pbmc[[lib]]$dataset <- datasets[[lib]]
+    pbmc[[lib]]$sample <- paste0(gsub('_.*','',pbmc[[lib]]$orig.ident),
+                                     gsub('TotalSeq-C-','',pbmc[[lib]]$hash.ID),
+                                     '-',gsub('.*_','',pbmc[[lib]]$orig.ident))
+    pbmc[[lib]]$stage <- plyr::revalue(factor(gsub('[Vacc]*_','',pbmc[[lib]]$orig.ident),levels=c('pre','post')),
+                                       c('pre'='T0','post'='T1'))
+    pbmc[[lib]]$donor <- plyr::revalue(gsub('Vacc([0-9]*)-[prepost]*','D\\1',pbmc[[lib]]$sample),
+                                       c('D4'='D2','D6'='D3','D10'='D4'))
+  } else if (datasets[[lib]] %in% c('ASCT_C','HD_C')) {
+    pbmc[[lib]]$dataset <- datasets[[lib]]
+    pbmc[[lib]]$sample <- pbmc[[lib]]$orig.ident
+    pbmc[[lib]]$stage <- 'T0'
+    pbmc[[lib]]$donor <- gsub('([RD][0-9]*)[prepostd90180]*$','\\1',pbmc[[lib]]$orig.ident)
+    pbmc[[lib]]$donor <- plyr::revalue(pbmc[[lib]]$donor, c('D10'='D1','D16'='D2','D26'='D3','D29'='D4','D36'='D5',
+                                                            'R10'='ASCT16','R16'='ASCT17','R26'='ASCT18',
+                                                            'R29'='ASCT19','R36'='ASCT20'))
+  }
+  pbmc[[lib]] <- RenameCells(pbmc[[lib]], add.cell.id=pbmc[[lib]]$sample)
+}
+
+pbmc <- lapply(pbmc, NormalizeData, verbose=FALSE)
+```
+
+add clonotype information
+
+```{r add_clonotypes}
+samples <- lapply(pbmc, function(x) unique(as.character(x$sample)))
+if (FALSE) {
+  tcr_combined <- list()
+  bcr_combined <- list()
+  for (lib in libraries) {
+    infile <- file.path('vdj','tcr',paste0(lib,'_annotations.csv'))
+    if (file.exists(infile)) {
+      tcr <- read.csv(infile,
+                      stringsAsFactors=FALSE)
+      for (sample in samples[[lib]]) {
+        bcs <- gsub('.*_([ACGT]*-[0-9]*)$','\\1',Cells(pbmc[[lib]])[pbmc[[lib]]$sample==sample])
+        tcr_combined[[sample]] <- combineTCR(tcr %>% dplyr::filter(barcode %in% bcs),
+                                             samples=sample,
+                                             filterMulti=TRUE)[[1]] 
+      }
+    }
+    infile <- file.path('vdj','bcr',paste0(lib,'_annotations.csv'))
+    if (file.exists(infile)) {
+      bcr <- read.csv(infile,
+                      stringsAsFactors=FALSE) 
+      for (sample in samples[[lib]]) {
+        bcs <- gsub('.*_([ACGT]*-[0-9]*)$','\\1',Cells(pbmc[[lib]])[pbmc[[lib]]$sample==sample])
+        bcr_combined[[sample]] <- combineBCR(list(bcr %>% dplyr::filter(barcode %in% bcs)),
+                                             samples=sample,
+                                             call.related.clones=FALSE,
+                                             filterMulti=TRUE)[[1]]
+      }
+    }
+  }
+  
+  saveRDS(tcr_combined,file.path('seurat','tcr_combined_all.rds'))
+  saveRDS(bcr_combined,file.path('seurat','bcr_combined_all.rds'))
+} else {
+  tcr_combined <- readRDS(file.path('seurat','tcr_combined_all.rds'))
+  bcr_combined <- readRDS(file.path('seurat','bcr_combined_all.rds'))
+}
+
+pbmc_meta <- do.call(rbind,
+                     lapply(libraries[1:29], function(lib) cbind(pbmc[[lib]]@meta.data %>% 
+                              dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, pct.ribo, nCount_SCT, nFeature_SCT,
+                                            predicted.celltype.l1, predicted.celltype.l1.score,
+                                            predicted.celltype.l2, predicted.celltype.l2.score,
+                                            predicted.celltype.l3, predicted.celltype.l3.score,
+                                            DF.classifications, celltype, dataset, sample, stage, donor),
+                              pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                              tibble::rownames_to_column('barcode'))) %>%
+  dplyr::mutate(stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+
+pbmc_meta_all <- do.call(rbind,
+                         lapply(libraries, function(lib) cbind(pbmc[[lib]]@meta.data %>% 
+                                                                 dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, pct.ribo, nCount_SCT, nFeature_SCT,
+                                                                               predicted.celltype.l1, predicted.celltype.l1.score,
+                                                                               predicted.celltype.l2, predicted.celltype.l2.score,
+                                                                               predicted.celltype.l3, predicted.celltype.l3.score,
+                                                                               DF.classifications, celltype, dataset, sample, stage, donor),
+                                                               pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                                  tibble::rownames_to_column('barcode'))) %>%
+  dplyr::mutate(stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+
+pbmc.T <- do.call(rbind,
+                  lapply(libraries[1:29],
+                         function(lib) do.call(rbind, lapply(intersect(samples[[lib]], names(tcr_combined)),
+                                                             function(smp) cbind(combineExpression(tcr_combined[[smp]], pbmc[[lib]], cloneCall='aa')@meta.data %>% 
+                                                                                   dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, nCount_SCT, nFeature_SCT,
+                                                                                                 predicted.celltype.l1, predicted.celltype.l1.score,
+                                                                                                 predicted.celltype.l2, predicted.celltype.l2.score,
+                                                                                                 predicted.celltype.l3, predicted.celltype.l3.score,
+                                                                                                 DF.classifications, celltype, dataset, sample, stage, donor, 
+                                                                                                 CTgene, CTnt, CTaa, CTstrict, Frequency, cloneType),
+                                                                                 pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                                                               tibble::rownames_to_column('barcode') %>%
+                                                               dplyr::filter(sample==smp))))) %>%
+  dplyr::mutate(cloneType=factor(tolower(gsub('Single','Small',gsub(' .*','',cloneType))),
+                                 levels=c('small','medium','large','hyperexpanded')),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+
+pbmc.T.all <- do.call(rbind,
+                      lapply(libraries,
+                             function(lib) do.call(rbind, lapply(intersect(samples[[lib]], names(tcr_combined)),
+                                                                 function(smp) cbind(combineExpression(tcr_combined[[smp]], pbmc[[lib]], cloneCall='aa')@meta.data %>% 
+                                                                                       dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, nCount_SCT, nFeature_SCT,
+                                                                                                     predicted.celltype.l1, predicted.celltype.l1.score,
+                                                                                                     predicted.celltype.l2, predicted.celltype.l2.score,
+                                                                                                     predicted.celltype.l3, predicted.celltype.l3.score,
+                                                                                                     DF.classifications, celltype, dataset, sample, stage, donor, 
+                                                                                                     CTgene, CTnt, CTaa, CTstrict, Frequency, cloneType),
+                                                                                     pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                                                                   tibble::rownames_to_column('barcode') %>%
+                                                                   dplyr::filter(sample==smp))))) %>%
+  dplyr::mutate(cloneType=factor(tolower(gsub('Single','Small',gsub(' .*','',cloneType))),
+                                 levels=c('small','medium','large','hyperexpanded')),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+
+pbmc.B <- do.call(rbind,
+                  lapply(libraries[1:29],
+                         function(lib) do.call(rbind, lapply(intersect(samples[[lib]], names(bcr_combined)),
+                                                             function(smp) cbind(combineExpression(bcr_combined[[smp]], pbmc[[lib]], cloneCall='aa')@meta.data %>% 
+                                                                                   dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, nCount_SCT, nFeature_SCT,
+                                                                                                 predicted.celltype.l1, predicted.celltype.l1.score,
+                                                                                                 predicted.celltype.l2, predicted.celltype.l2.score,
+                                                                                                 predicted.celltype.l3, predicted.celltype.l3.score,
+                                                                                                 DF.classifications, celltype, dataset, sample, stage, donor, 
+                                                                                                 CTgene, CTnt, CTaa, CTstrict, Frequency, cloneType),
+                                                                                 pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                                                               tibble::rownames_to_column('barcode') %>%
+                                                               dplyr::filter(sample==smp))))) %>%
+  dplyr::mutate(cloneType=factor(tolower(gsub('Single','Small',gsub(' .*','',cloneType))),
+                                 levels=c('small','medium','large','hyperexpanded')),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+
+pbmc.B.all <- do.call(rbind,
+                      lapply(libraries,
+                             function(lib) do.call(rbind, lapply(intersect(samples[[lib]], names(bcr_combined)),
+                                                                 function(smp) cbind(combineExpression(bcr_combined[[smp]], pbmc[[lib]], cloneCall='aa')@meta.data %>% 
+                                                                                       dplyr::select(orig.ident, nCount_RNA, nFeature_RNA, pct.mito, nCount_SCT, nFeature_SCT,
+                                                                                                     predicted.celltype.l1, predicted.celltype.l1.score,
+                                                                                                     predicted.celltype.l2, predicted.celltype.l2.score,
+                                                                                                     predicted.celltype.l3, predicted.celltype.l3.score,
+                                                                                                     DF.classifications, celltype, dataset, sample, stage, donor, 
+                                                                                                     CTgene, CTnt, CTaa, CTstrict, Frequency, cloneType),
+                                                                                     pbmc[[lib]]@reductions$ref.umap@cell.embeddings) %>%
+                                                                   tibble::rownames_to_column('barcode') %>%
+                                                                   dplyr::filter(sample==smp))))) %>%
+  dplyr::mutate(cloneType=factor(tolower(gsub('Single','Small',gsub(' .*','',cloneType))),
+                                 levels=c('small','medium','large','hyperexpanded')),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  tibble::column_to_rownames('barcode')
+```
+
+set color scheme
+
+```{r colors}
+library(RColorBrewer)
+celltype_colors <- c('B Naive'='#f6c47d',
+                     'B Intermediate'='#ed7d64',
+                     'B Memory'='#dc5855',
+                     'B'='#ed7d64',
+                     'CD4 CTL'='seagreen1',
+                     'CD4 Naive'='darkolivegreen1',
+                     'CD4 Proliferating'='darkolivegreen2',
+                     'CD4 TCM'='darkolivegreen3',
+                     'CD4 TEM'='darkolivegreen4',
+                     'CD4 T'='darkolivegreen3',
+                     'CD8 Naive'='lightblue1',
+                     'CD8 Proliferating'='lightblue2',
+                     'CD8 TCM'='lightblue3',
+                     'CD8 TEM'='lightblue4',
+                     'CD8 T'='lightblue3',
+                     'CD8 T VI'='blue3',
+                     'DC'='lightpink',
+                     'Mono'='antiquewhite3',
+                     'NK'='plum3',
+                     'Other'='gray30',
+                     'Other T'='darkslategray4',
+                     'Plasmablast'='#834371',
+                     'Treg'='seagreen4')
+
+stage_colors <- c('T0'='yellow3',
+                  'T1'='orange3',
+                  'T2'='tomato3',
+                  'post'='gray',
+                  'pre'='white')
+
+dataset_colors <- c('ASCT'='red3',
+                    'HD1'='blue3',
+                    'HD2'='forestgreen',
+                    'ASCT_C'='coral1',
+                    'HD_C'='darkorchid')
+
+dataset_shapes <- c('ASCT'=21, 'HD1'=22, 'HD2'=23, 'ASCT_C'=24, 'HD_C'=25)
+
+donor_colors <- c("ASCT1"="#54A1F9",
+                  "ASCT2"="#FEA040",
+                  "ASCT3"="#0A9963",
+                  setNames(brewer.pal(6,'Set2'),paste0('D',seq(1,6))),
+                  setNames(brewer.pal(8,'Set3'),c('ASCT16','ASCT17','ASCT18','ASCT19','ASCT20')))
+                  
+donor_shapes <- c('ASCT1'=21,'ASCT2'=22,'ASCT3'=23)
+ 
+cloneType_colors <- c('hyperexpanded'='#d6170f', 
+                      'large'='#e6746f', 
+                      'medium'='#efa29f', 
+                      'small'='#f7d1cf')
+
+traceability_colors <- c('new'='limegreen','other'='gray30')
+```
+
+# clustering
+
+show PBMC data in reference embedding; cluster assignment is combination of level 2 (for B and T) and level 1 (other)
+
+```{r umap_celltype, fig.width=4.5,fig.height=3, dev=c('png'), dpi=600}
+anno <- data.frame(x=c(-15,-15),
+                   xend=c(-12,-15),
+                   y=c(-15,-15),
+                   yend=c(-15,-12))
+anno_text <- data.frame(x=c(-13.5,-15.5),
+                        y=c(-15.5,-13.5),
+                        label=c('UMAP 1','UMAP 2'),
+                        angle=c(0,90))
+ 
+# ggplot(pbmc_meta %>%
+#          dplyr::filter(dataset=='ASCT') %>%
+#          dplyr::mutate(donor=factor(donor,levels=names(donor_colors))),
+#        aes(x=refUMAP_1,y=refUMAP_2,color=celltype)) +
+#   geom_point(size=.01) +
+#   geom_segment(data=anno,
+#                aes(x=x,y=y,xend=xend,yend=yend),
+#                arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.25,inherit.aes=FALSE) +
+#   geom_text(data=anno_text,
+#             aes(x=x,y=y,label=label,angle=angle),size=1.5,inherit.aes=FALSE) +
+#   theme_void() +
+#   coord_fixed() +
+#   labs(title='',color='') +
+#   scale_color_manual(values=celltype_colors) +
+#   guides(color=guide_legend(override.aes=list(size=3))) +
+#   theme(legend.key.size=unit(3,'mm'),
+#         legend.position='right',
+#         legend.box='vertical',
+#         strip.clip='off')
+
+ggplot(pbmc_meta %>%
+         dplyr::filter(dataset=='ASCT') %>%
+         dplyr::mutate(donor=factor(donor,levels=names(donor_colors))),
+       aes(x=refUMAP_1,y=refUMAP_2,color=celltype)) +
+  geom_point(size=.01) +
+  geom_segment(data=anno,
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.25,inherit.aes=FALSE) +
+  geom_text(data=anno_text,
+            aes(x=x,y=y,label=label,angle=angle),size=1.5,inherit.aes=FALSE) +
+  geom_text_repel(data=pbmc_meta %>%
+                    dplyr::filter(dataset=='ASCT') %>%
+                    dplyr::group_by(celltype) %>%
+                    dplyr::summarise(x=mean(refUMAP_1),
+                                     y=mean(refUMAP_2)),
+                  aes(x=x,y=y,label=celltype,fill=celltype),
+                  color='black',
+                  segment.alpha=.5,
+                  #label.padding=unit(.5,'mm'),
+                  #label.size=unit(.25,'mm'),
+                  size=2) +
+  theme_void() +
+  coord_fixed() +
+  labs(title='',color='') +
+  scale_color_manual(values=celltype_colors) +
+  scale_fill_manual(values=celltype_colors) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.position='none',
+        legend.box='vertical',
+        strip.clip='off')
+```
+
+
+```{r umap_donor, fig.width=13.5,fig.height=3, dev=c('png'), dpi=600}
+ggplot(pbmc_meta %>% 
+         dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','HD1','HD2'))) %>%
+         dplyr::slice(sample(1:n())),
+       aes(x=refUMAP_1,y=refUMAP_2,color=donor)) +
+  geom_point(size=.01) +
+  geom_segment(data=anno,
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.25,inherit.aes=FALSE) +
+  geom_text(data=anno_text,
+            aes(x=x,y=y,label=label,angle=angle),size=1.5,inherit.aes=FALSE) +
+  theme_void() +
+  coord_fixed() +
+  labs(title='',color='') +
+  facet_wrap(~dataset, ncol=3) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  scale_color_manual(values=donor_colors) +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.position='right',
+        legend.box='vertical',
+        strip.clip='off')
+```
+
+```{r umap_donor_all, fig.width=20.5,fig.height=3, dev=c('png'), dpi=600}
+ggplot(pbmc_meta_all %>% 
+         dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C')),
+                       donor=factor(donor, levels=c(paste0('ASCT',c(1,2,3,16,17,18,19)),paste0('D',seq(1,6))))) %>%
+         dplyr::slice(sample(1:n())),
+       aes(x=refUMAP_1,y=refUMAP_2,color=donor)) +
+  geom_point(size=.01) +
+  geom_segment(data=anno,
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.25,inherit.aes=FALSE) +
+  geom_text(data=anno_text,
+            aes(x=x,y=y,label=label,angle=angle),size=1.5,inherit.aes=FALSE) +
+  theme_void() +
+  coord_fixed() +
+  labs(title='',color='') +
+  facet_wrap(~dataset, ncol=5) +
+  guides(color=guide_legend(override.aes=list(size=3))) +
+  scale_color_manual(values=donor_colors) +
+  theme(legend.key.size=unit(3,'mm'),
+        legend.position='right',
+        legend.box='vertical',
+        strip.clip='off')
+```
+
+look at celltype proportions at T0
+
+```{r celltype_proportions,fig.width=4,fig.height=2.25}
+pbmc_meta %>%
+  dplyr::filter(stage=='T0') %>%
+  dplyr::mutate(celltype=predicted.celltype.l1) %>%
+  dplyr::group_by(dataset,sample,stage,donor,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  ggplot(aes(x=donor,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  facet_grid(.~dataset,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors,limits=force) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.background=element_blank(),
+        strip.clip = 'off') +
+  labs(x='',y='% cells',fill='')
+```
+
+look at celltype proportions at T0 for all datasets
+
+```{r celltype_proportions_all,fig.width=5.5,fig.height=2.25}
+pbmc_meta_all %>%
+  dplyr::filter(stage=='T0') %>%
+  dplyr::mutate(celltype=predicted.celltype.l1) %>%
+  dplyr::group_by(dataset,donor,stage,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,c('ASCT','ASCT_C','HD1','HD2','HD_C'))) %>%
+  ggplot(aes(x=donor,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  facet_grid(.~dataset,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors,limits=force) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.background=element_blank(),
+        strip.clip = 'off') +
+  labs(x='',y='% cells',fill='')
+```
+
+a PCA of this
+
+```{r PCA_composition, fig.width=3.5, fig.height=2.5}
+library(ggfortify)
+
+md_here <- pbmc_meta_all %>%
+  dplyr::filter(stage=='T0',sample %in% unlist(samples)) %>%
+  dplyr::group_by(dataset,donor,stage,sample,predicted.celltype.l1) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n))
+
+df <- md_here %>%
+  ungroup() %>%
+  dplyr::select(sample,frac,predicted.celltype.l1) %>%
+  spread(predicted.celltype.l1,frac,fill=0) %>%
+  tibble::column_to_rownames('sample')
+
+df[is.na(df)] <- 0
+
+pca <- prcomp(df, scale=TRUE)
+
+meta <- md_here %>%
+  dplyr::select(dataset,donor,sample,stage) %>%
+  dplyr::mutate(setting=factor(ifelse(grepl('ASCT',dataset),'A','H'),levels=c('H','A'))) %>%
+  dplyr::distinct(.keep_all=TRUE) %>%
+  tibble::column_to_rownames('sample')
+
+autoplot(pca, data = meta[row.names(pca$x),], fill = 'setting', shape='dataset', size=3) + 
+  theme_classic() + 
+  scale_shape_manual(values=dataset_shapes) + 
+  scale_fill_manual(values=c('A'='red3','H'='darkseagreen3'), labels=c('HD','ASCT')) +
+  guides(fill=guide_legend(override.aes=list(pch=22,stroke=0,color='white',size=4)),
+         shape=guide_legend(override.aes=list(fill='gray',size=2.5)))  +
+  labs(shape='',fill='') +
+  theme(legend.key.size=unit(3,'mm'))
+```
+
+# T cells
+
+```{r T_celltype_proportions,fig.width=8,fig.height=2.25}
+pbmc_meta %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T')) %>%
+  dplyr::group_by(dataset,donor,stage,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  ggplot(aes(x=stage,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  ggh4x::facet_nested(~dataset+donor,nest_line=TRUE,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) +
+  labs(x='',y='% CD4/CD8 cells',fill='')
+```
+
+```{r T_celltype_proportions_T0,fig.width=4,fig.height=2.25}
+pbmc_meta %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'),stage=='T0') %>%
+  dplyr::group_by(dataset,donor,stage,sample,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>% 
+  ggplot(aes(x=donor,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  facet_grid(~dataset,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.clip='off') +
+  labs(x='',y='% CD4/CD8 cells',fill='')
+```
+
+```{r T_celltype_proportions_VI,fig.width=3.5,fig.height=2.25}
+library(lme4)
+pv <- list()
+for (ds in c('ASCT','HD1','HD2')) {
+  tmp <- pbmc_meta %>% dplyr::filter(dataset==ds,predicted.celltype.l1 %in% c('CD8 T'))#,donor!='ASCT2')
+  mod <- glmer(celltype=='CD8 T VI' ~ (stage!='T0') + (1 | orig.ident), family=binomial, data=tmp)
+  coef <- summary(mod)$coefficients
+  pv[[ds]] <- data.frame(pval=coef[2,4],
+                         dataset=ds) %>%
+    dplyr::mutate(p=stars.pval(pval))
+}
+
+pbmc_meta %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD8 T')) %>% #,donor!='ASCT2') %>%
+  dplyr::group_by(dataset,donor,stage,sample,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  dplyr::filter(celltype=='CD8 T VI') %>%
+  ggplot(aes(x=stage,y=100*frac,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA) + 
+  geom_point(color='gray') +
+  geom_line(aes(group=donor),color='gray',size=.25) +
+  geom_text(data=do.call(rbind,pv) %>% dplyr::mutate(stage='T1',
+                                                     dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                                                     donor='dummy'),
+            aes(y=Inf,label=paste0('p=',signif(pval,2))),color='black',size=3) +
+  facet_wrap(~dataset) +
+  scale_color_manual(values=dataset_colors) + 
+  scale_shape_manual(values=c(donor_shapes,setNames(rep(21,6),paste0('D',seq(1,6))))) +
+  theme_classic() + 
+  coord_cartesian(clip='off') +
+  theme(legend.position='none',
+      legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) +
+  labs(x='',y='% VI of CD8 T',fill='')
+```
+
+plot clonotype expansion for all interesting clonotypes (found in both samples after vaccination but not before)
+
+```{r clonotype_expansion_T, fig.width=4,fig.height=2.25}
+donors <- unique(pbmc.T$donor)
+md.T <- pbmc.T %>%
+  dplyr::filter(dataset %in% c('ASCT','HD2'))
+
+cts.T <- md.T %>%
+  dplyr::filter(!is.na(CTaa) & !grepl('^NA_|_NA$',CTaa)) %>%
+  dplyr::group_by(dataset,donor,CTaa) %>%
+  dplyr::summarise(n=n(),
+                   ns=n_distinct(stage),
+                   stages=paste0(unique(stage),collapse=',')) %>%
+  dplyr::filter(ns > 1,!grepl('T0',stages)) %>%
+  dplyr::pull(CTaa)
+ncts.T <- length(cts.T)
+
+ncts_per_donor.T <- md.T %>%
+  dplyr::filter(!is.na(CTaa) & !grepl('^NA_|_NA$',CTaa)) %>%
+  dplyr::group_by(dataset,donor,CTaa) %>%
+  dplyr::summarise(n=n(),
+                   ns=n_distinct(stage),
+                   stages=paste0(unique(stage),collapse=',')) %>%
+  dplyr::filter(ns > 1,!grepl('T0',stages)) %>%
+  dplyr::group_by(dataset,donor) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::pull(n,donor)
+
+#col.par = function(n) sample(seq(0.3, 1, length.out=ncts.T),n)
+
+set.seed(0)
+ct_colors.T <- hcl(h=seq(15, 375, length = ncts.T+1),l = 65, c = 100)[sample(1:ncts.T,ncts.T)]
+names(ct_colors.T) <- cts.T
+
+cts_here.T <- md.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'),!is.na(CTaa),!grepl('NA',CTaa)) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n()) %>%
+  dplyr::group_by(dataset,donor,stage,CTaa) %>%
+  dplyr::summarise(n=n(),ntot=mean(ntot)) %>%
+  dplyr::mutate(frac=n/ntot) %>%
+  dplyr::filter(frac >= .01,n > 1) %>%
+  dplyr::pull(CTaa)
+
+tmp <- rep('gray80',length(setdiff(cts_here.T,names(ct_colors.T))))
+names(tmp) <- setdiff(cts_here.T,names(ct_colors.T))
+ct_colors_here.T <- c(ct_colors.T,tmp)
+
+md.T %>%
+  dplyr::filter(dataset=='ASCT') %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T')) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n(),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  dplyr::filter(CTaa %in% c(cts_here.T,cts.T)) %>%
+  dplyr::mutate(CTaa=factor(CTaa,levels=names(ct_colors_here.T))) %>%
+  dplyr::group_by(dataset,donor,stage,sample,CTaa) %>%
+  dplyr::summarise(n=n(),ntot=mean(ntot)) %>%
+  dplyr::mutate(frac=n/ntot) %>%
+  rowwise() %>%
+  dplyr::mutate(donor=paste0(donor,'\n',if (donor %in% names(ncts_per_donor.T)) ncts_per_donor.T[[donor]] else '0',' new')) %>%
+  ggplot(aes(x = stage, fill = CTaa, group = CTaa,
+             stratum = CTaa, alluvium = CTaa,
+             y = 100*frac, label = CTaa)) +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.position='none',
+        legend.text=element_text(size=6),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.key.size=unit(3,'mm')) +
+  geom_col(width=.3,color='black',size=.1) +
+  geom_flow(stat = "alluvium") +
+  scale_fill_manual(values=ct_colors_here.T) +
+  labs(y='% CD4/CD8 T cells',fill='') +
+  facet_grid(~donor) +
+  coord_cartesian(clip='off',ylim=c(0,50))
+```
+
+look at clonal diversity (Inv. Simpson score) for CD4/CD8 T cells at T0
+
+```{r clonal_diversity_T_T0,fig.width=2.5,fig.height=2.25}
+CD4_CD8 <- row.names(pbmc_meta_all)[pbmc_meta_all$predicted.celltype.l1 %in% c("CD4 T", "CD8 T")]
+tcr_comb <- lapply(names(tcr_combined), function(x) tcr_combined[[x]][tcr_combined[[x]]$barcode %in% CD4_CD8,])
+names(tcr_comb) <- names(tcr_combined)
+
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(stage=='T0', dataset %in% c('ASCT','HD1','HD2'), sample %in% names(tcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(tcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(pch=21,fill='white',color='black',position=position_dodge(width=.5),size=2) + 
+  stat_compare_means(aes(group=dataset),label = "p.format", 
+                     comparisons=list(c('ASCT','HD1'),
+                                      c('ASCT','HD2')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  theme_classic() +
+  #scale_y_log10() +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+and for all samples
+
+```{r clonal_diversity_T_T0_all,fig.width=2.5,fig.height=2.25}
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(stage=='T0', sample %in% names(tcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(tcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(pch=21,fill='white',color='black',position=position_dodge(width=.5),size=2) + 
+  stat_compare_means(aes(group=dataset),label = "p.signif", 
+                     comparisons=list(c('ASCT','ASCT_C'),
+                                      c('ASCT','HD1'),
+                                      c('ASCT','HD2'),
+                                      c('ASCT','HD_C')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  theme_classic() +
+  #scale_y_log10() +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+and all time points
+
+```{r clonal_diversity_T,fig.width=4,fig.height=2.25}
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(dataset %in% c('ASCT','HD1','HD2'), sample %in% names(tcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(tcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+pval1 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD1','Inv.Simpson'])$p.value
+pval2 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
+pval3 <- wilcox.test(df[df$dataset=='HD1','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
+
+ggplot(df, aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
+  geom_line(aes(group=donor),color='gray',size=.25) +
+  geom_text(data=data.frame(pval=pval1,
+                                Inv.Simpson=420,
+                                stage='T1',
+                                dataset=factor('HD1',levels=c('ASCT','HD1','HD2'))),
+                aes(label=stars.pval(pval1)),size=2.5, color='black') +
+  geom_text(data=data.frame(pval=pval2,
+                            Inv.Simpson=420,
+                            stage='T1',
+                            dataset=factor('HD2',levels=c('ASCT','HD1','HD2'))),
+            aes(label=stars.pval(pval2)),size=2.5, color='black') +
+  theme_classic() +
+  #scale_y_log10() +
+  facet_grid(.~dataset, scales='free_x', space='free_x') +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+
+ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))), 
+       aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
+  geom_line(aes(group=donor),color='gray',size=.25) +
+  theme_classic() +
+  stat_compare_means(aes(group=donor),label = "p.signif",
+                     comparisons=list(c('post','pre')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  facet_grid(.~dataset, scales='free_x', space='free_x') +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+where are the new clonotypes
+
+```{r umap_new_clones_T,fig.width=3,fig.height=3, dev=c('png')}
+pbmc.T %>%
+  dplyr::filter(dataset=='ASCT') %>%
+  dplyr::mutate(CTaa=factor(ifelse(is.na(CTaa) | !(predicted.celltype.l1 %in% c('CD4 T','CD8 T','other T')), 'none',
+                                   ifelse(CTaa %in% cts.T, CTaa, 'other')),
+                            levels=rev(c(cts.T,'other','none')))) %>%
+  dplyr::arrange(CTaa) %>%
+  ggplot(aes(x=refUMAP_1,y=refUMAP_2,color=CTaa)) +
+  geom_point(aes(size=CTaa)) +
+  geom_segment(data=anno,
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.5,inherit.aes=FALSE) +
+  geom_text(data=anno_text,
+            aes(x=x,y=y,label=label,angle=angle),size=2.,inherit.aes=FALSE) +
+  theme_void() +
+  coord_fixed() +
+  scale_size_manual(values=setNames(c(rep(.5,length(cts.T)),.1,.1),c(cts.T,c('none','other')))) +
+  scale_color_manual(values=c(ct_colors.T,c('none'='gray80','other'='gray50'))) +
+  theme(legend.key.size=unit(3,'mm')) +
+  theme(legend.position='none') +
+  labs(title='')
+```
+
+phenotype distribution
+
+```{r TCR_phenotype_distribution,fig.width=3.5,fig.height=2.25}
+pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'), dataset=='ASCT') %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n()) %>%
+  dplyr::mutate(traceability=factor(ifelse(CTaa %in% cts.T, 'new','other'),
+                                    levels=c('new','other'))) %>%
+  dplyr::group_by(dataset,donor,stage,celltype,traceability) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage,traceability) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  ggplot(aes(x=stage,y=100*frac,color=celltype)) + 
+  geom_jitter(width=.1) + 
+  stat_summary(aes(y = 100*frac,color=celltype,group=celltype), fun.y=mean, geom="line", na.rm=TRUE, size=1) +
+  scale_color_manual(values=celltype_colors,na.value='gray90',limits=force) +
+  scale_fill_manual(values=celltype_colors,na.value='gray90',limits=force) +
+  scale_shape_manual(values=donor_shapes) +
+  #ggh4x::facet_nested(~dataset+traceability,nest_line=TRUE,scales='free_x',space='free_x') +
+  facet_grid(~traceability,scales='free_x',space='free_x') +
+  theme_classic() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position='right',
+        legend.box.margin=unit(c(-5,-10,-0,-5),'mm'),
+        strip.background = element_rect(color = "black", fill=NA, size = 0)) +
+  guides(fill=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         color=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         shape=guide_legend(ncol=1)) +
+  labs(y='% CD4/CD8 T cells',x='',fill='',color='',shape='')
+```
+
+check how many of cells post-vaccination with new or other clonotypes are CD8 VI T cells
+
+```{r TCR_phenotype_distribution_2,fig.width=1.5,fig.height=2.25}
+mod <- glmer(celltype == 'CD8 T VI' ~ traceability + (1 | sample),
+             family='binomial',
+             data=pbmc.T %>% 
+               dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T')) %>%
+               dplyr::mutate(traceability=factor(ifelse(CTaa %in% cts.T, 'new', 'other'),
+                                                 levels=c('new','other'))))
+pval <- summary(mod)$coefficients[2,4]
+pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'), dataset=='ASCT') %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n()) %>%
+  dplyr::mutate(traceability=factor(ifelse(CTaa %in% cts.T, 'new','other'),
+                                    levels=c('new','other'))) %>%
+  dplyr::group_by(dataset,donor,stage,celltype,traceability) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage,traceability) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  dplyr::filter(celltype=='CD8 T VI',stage!='T0') %>%
+  ggplot(aes(x=traceability,y=100*frac)) + 
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=.1) + 
+  geom_text(data=data.frame(pval=pval),
+            aes(x=1.5,y=Inf,label=stars.pval(pval)),size=2.5, color='black') +
+  # stat_compare_means(method='wilcox.test',
+  #                    label = "p.format", 
+  #                    label.y=10,
+  #                    bracket.size=.25,tip.length=.01,size=2.5) +
+  theme_classic() +
+  coord_cartesian(clip='off') +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position='right',
+        legend.box.margin=unit(c(-5,-10,-0,-5),'mm'),
+        strip.background = element_rect(color = "black", fill=NA, size = 0)) +
+  guides(fill=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         color=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         shape=guide_legend(ncol=1)) +
+  labs(y='% VI of CD8 T cells',x='',fill='',color='',shape='')
+```
+
+clone size distribution
+
+```{r T_cloneType_distribution_pie,fig.width=3.5,fig.height=2.5}
+pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'), !is.na(CTaa), dataset=='ASCT') %>%
+  dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post')),
+                traceability=factor(ifelse(CTaa %in% cts.T, 'new','other'),
+                                    levels=c('new','other'))) %>%
+  dplyr::group_by(dataset,stage,traceability,cloneType) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  ggplot(aes(x='',y=100*frac,fill=cloneType)) + 
+  geom_bar(stat='identity',width=.25,color='black') + 
+  facet_grid(stage~traceability, switch='y') + #,scales='free_x',space='free_x') +
+  scale_fill_manual(values=cloneType_colors) + 
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        strip.text.y=element_text(angle=90,hjust=.5,vjust=.5),
+        axis.text.x=element_blank()) +
+  labs(x='',y='',fill='')
+```
+
+chain length
+
+```{r T_chain_length,fig.width=8,fig.height=2.25}
+pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'), !is.na(CTaa),!grepl('^NA_|_NA$',CTaa)) %>%
+  dplyr::distinct(stage, dataset, donor, CTaa) %>%
+  dplyr::mutate(chain_length=nchar(CTaa)-1,
+                #stage=ifelse(stage=='T0','pre','post'),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  ggplot(aes(x=stage,y=chain_length,color=dataset)) + 
+  geom_violin(adjust=2) +
+  geom_boxplot(outlier.shape=NA) + 
+  # stat_compare_means(aes(group=donor),label = "p.format", 
+  #                    comparisons=list(c('post','pre')),
+  #                    method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  ggh4x::facet_nested(~dataset+donor,nest_line=TRUE,scales='free_x',space='free_x') +
+  #facet_grid(.~dataset,scales='free_x',space='free_x') +
+  scale_color_manual(values=dataset_colors) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5)) +
+  labs(x='',y='CDR3 length',fill='') +
+  scale_y_continuous(limits=c(15,40))
+```
+
+compare TRAV / TRBV gene usage before and after vaccination for our dataset, using only the top5 up-regulated chains
+
+```{r T_TRV_distribution,fig.width=4.5,fig.height=2.25}
+trav.usage <- pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'),!is.na(CTgene),!grepl('_NA$|^NA_',CTgene)) %>%
+  dplyr::mutate(trv=gsub('.*TRA(V[^\\.]*)\\..*$','\\1',CTstrict)) %>% 
+  dplyr::group_by(dataset,donor,stage,sample,trv) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(frac=n/sum(n),
+                ntot=sum(n),
+                stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))) %>% 
+  dplyr::group_by(dataset,trv) %>%
+  dplyr::mutate(nstage=n_distinct(stage),
+                ndonor=n_distinct(donor)) %>%
+  dplyr::ungroup() 
+
+trbv.usage <- pbmc.T %>%
+  dplyr::filter(predicted.celltype.l1 %in% c('CD4 T','CD8 T'),!is.na(CTgene),!grepl('_NA$|^NA_',CTgene)) %>%
+  dplyr::mutate(trv=gsub('.*TRB(V[^\\.]*)\\..*$','\\1',CTstrict)) %>% 
+  dplyr::group_by(dataset,donor,stage,sample,trv) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(frac=n/sum(n),
+                ntot=sum(n),
+                stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))) %>% 
+  dplyr::group_by(dataset,trv) %>%
+  dplyr::mutate(nstage=n_distinct(stage),
+                ndonor=n_distinct(donor)) %>%
+  dplyr::ungroup() 
+
+pvals.trav <- trav.usage %>%
+  dplyr::filter(nstage > 1, ndonor > 1) %>% 
+  nest(data = -c(dataset,trv)) %>% 
+  mutate(
+    fit = map(data, ~ glm(cbind(n,ntot-n) ~ stage, data = .x, family='binomial')),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied) %>%
+  dplyr::select(dataset,trv,term,estimate,p.value) %>%
+  dplyr::mutate(padj=p.adjust(p.value, method='BH')) %>%
+  dplyr::filter(term=='stagepost') 
+
+pvals.trav2 <- trav.usage %>%
+  dplyr::filter(nstage > 1, ndonor > 1) %>% 
+  nest(data = -c(dataset,trv)) %>% 
+  mutate(
+    fit = map(data, ~ glm(cbind(n,ntot-n) ~ stage, data = .x, family='binomial')),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied) %>%
+  dplyr::select(dataset,trv,term,estimate,p.value) %>%
+  dplyr::mutate(padj=p.adjust(p.value, method='BH')) %>%
+  dplyr::filter(term=='stagepost') 
+
+sig.trav <- pvals.trav %>% 
+  dplyr::filter(dataset=='ASCT', estimate > 0) %>% 
+  dplyr::slice_min(padj, n=5) %>% 
+  dplyr::pull(trv)
+
+pvals.trbv <- trbv.usage %>%
+  dplyr::filter(nstage > 1, ndonor > 1) %>% 
+  nest(data = -c(dataset,trv)) %>% 
+  mutate(
+    fit = map(data, ~ glm(cbind(n,ntot-n) ~ stage, data = .x, family='binomial')),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied) %>%
+  dplyr::select(dataset,trv,term,estimate,p.value) %>%
+  dplyr::mutate(padj=p.adjust(p.value, method='BH')) %>%
+  dplyr::filter(term=='stagepost') 
+
+sig.trbv <- pvals.trbv %>% 
+  dplyr::filter(dataset=='ASCT', estimate > 0) %>% 
+  dplyr::slice_min(padj, n=5) %>% 
+  dplyr::pull(trv)
+
+usage <- rbind(trav.usage %>% dplyr::filter(dataset=='ASCT', trv %in% sig.trav) %>% dplyr::mutate(chain='alpha'),
+               trbv.usage %>% dplyr::filter(dataset=='ASCT', trv %in% sig.trbv) %>% dplyr::mutate(chain='beta'))
+pvals <- rbind(pvals.trav %>% dplyr::filter(dataset=='ASCT', trv %in% sig.trav) %>% dplyr::mutate(chain='alpha'),
+               pvals.trbv %>% dplyr::filter(dataset=='ASCT', trv %in% sig.trbv) %>% dplyr::mutate(chain='beta'))
+
+ggplot(usage, aes(x=trv,y=100*frac)) +
+  geom_boxplot(aes(fill=stage),position=position_dodge(.8)) +
+  geom_point(aes(color=donor,group=stage),position=position_dodge(.8)) +
+  geom_text(data=pvals,     aes(x=trv,y=Inf,label=ifelse(padj < .05, stars.pval(padj), 'n.s.')),
+            size=2, hjust=0.5,vjust=0) +
+  theme_classic() +
+  scale_color_manual(values=donor_colors) +
+  scale_fill_manual(values=stage_colors) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.background=element_blank(),
+        strip.placement='outside',
+        legend.key.size=unit(3,'mm')) +
+  facet_wrap(~chain, ncol=2, scales='free') +
+  coord_cartesian(clip='off') +
+  labs(x='',y='% CD4/CD8 cells',fill='',color='')
+```
+
+# B cells
+
+```{r B_celltype_proportions,fig.width=8,fig.height=2.25}
+pbmc_meta %>%
+  dplyr::filter(predicted.celltype.l1=='B') %>%
+  dplyr::group_by(dataset,donor,stage,sample,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                celltype=factor(celltype,levels=c('B Naive','B Intermediate','B Memory','Plasmablast')),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  ggplot(aes(x=stage,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  ggh4x::facet_nested(~dataset+donor,nest_line=TRUE,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors,limits=force) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.clip='off') +
+  labs(x='',y='% B cells',fill='')
+```
+
+```{r B_celltype_proportions_T0,fig.width=4,fig.height=2.25}
+pbmc_meta %>%
+  dplyr::filter(predicted.celltype.l1=='B',stage=='T0') %>%
+  dplyr::group_by(dataset,donor,stage,sample,celltype) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n),
+                dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                donor=factor(donor,levels=names(donor_colors))) %>%
+  ggplot(aes(x=donor,y=100*frac,fill=celltype)) + 
+  geom_col() + 
+  facet_grid(~dataset,scales='free_x',space='free_x') +
+  scale_fill_manual(values=celltype_colors) + 
+  theme_classic() + 
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.clip='off') +
+  labs(x='',y='% B cells',fill='')
+```
+
+look at clonal diversity (Inv. Simpson score) for B cells at T0
+
+```{r clonal_diversity_B_T0,fig.width=2.5,fig.height=2.25}
+B <- row.names(pbmc_meta_all)[pbmc_meta_all$predicted.celltype.l1 %in% c("B")]
+bcr_comb <- lapply(names(bcr_combined), function(x) bcr_combined[[x]][bcr_combined[[x]]$barcode %in% B,])
+names(bcr_comb) <- names(bcr_combined)
+
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(stage=='T0', dataset %in% c('ASCT','HD1','HD2'), sample %in% names(bcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(bcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(pch=21,fill='white',color='black',position=position_dodge(width=.5),size=2) + 
+  stat_compare_means(aes(group=dataset),label = "p.signif", 
+                     comparisons=list(c('ASCT','HD1'),
+                                      c('ASCT','HD2')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  theme_classic() +
+  #scale_y_log10() +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+and for all samples
+
+```{r clonal_diversity_B_T0_all,fig.width=2.5,fig.height=2.25}
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(stage=='T0', sample %in% names(bcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(bcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(pch=21,fill='white',color='black',position=position_dodge(width=.5),size=2) + 
+  stat_compare_means(aes(group=dataset),label = "p.signif", 
+                     comparisons=list(c('ASCT','ASCT_C'),
+                                      c('ASCT','HD1'),
+                                      c('ASCT','HD2'),
+                                      c('ASCT','HD_C')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  theme_classic() +
+  #scale_y_log10() +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+and all time points
+
+```{r clonal_diversity_B,fig.width=4,fig.height=2.25}
+smps <- pbmc_meta_all %>% 
+  dplyr::filter(dataset %in% c('ASCT','HD1','HD2'), sample %in% names(bcr_comb)) %>% 
+  dplyr::pull(sample) %>% 
+  unique() %>%
+  as.character()
+df <- clonalDiversity(bcr_comb[smps], cloneCall='gene',group='sample', exportTable=TRUE) %>%
+  dplyr::left_join(pbmc_meta_all %>% 
+                     dplyr::select(sample,stage,donor,dataset) %>%
+                     dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
+  dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
+
+pval1 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD1','Inv.Simpson'])$p.value
+pval2 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
+pval3 <- wilcox.test(df[df$dataset=='HD1','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
+
+ggplot(df, aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
+  geom_line(aes(group=donor),color='gray',size=.25) +
+  geom_text(data=data.frame(pval=pval1,
+                                Inv.Simpson=115,
+                                stage='T1',
+                                dataset=factor('HD1',levels=c('ASCT','HD1','HD2'))),
+                aes(label=stars.pval(pval1)),size=2.5, color='black') +
+  geom_text(data=data.frame(pval=pval2,
+                            Inv.Simpson=115,
+                            stage='T1',
+                            dataset=factor('HD2',levels=c('ASCT','HD1','HD2'))),
+            aes(label=stars.pval(pval2)),size=2.5, color='black') +
+  theme_classic() +
+  #scale_y_log10() +
+  facet_grid(.~dataset, scales='free_x', space='free_x') +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+
+ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))), 
+       aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
+  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
+  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
+  geom_line(aes(group=donor),color='gray',size=.25) +
+  theme_classic() +
+  stat_compare_means(aes(group=donor),label = "p.signif",
+                     comparisons=list(c('post','pre')),
+                     method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
+  facet_grid(.~dataset, scales='free_x', space='free_x') +
+  scale_color_manual(values=dataset_colors,guide=FALSE) +
+  theme(legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position=c(.9,.25),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.title=element_blank(),
+        strip.background=element_blank(),
+        strip.clip = "off") +
+  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
+  labs(x='',shape='')
+```
+
+look at expansion of B cells, not based on clonotype sequence but on clonotype gene annotation
+
+```{r clonotype_expansion_B, fig.width=4,fig.height=2.25}
+donors <- unique(pbmc.B$donor)
+md.B <- pbmc.B %>%
+  dplyr::filter(dataset %in% c('ASCT','HD2')) %>%
+  dplyr::mutate(CTaa=paste0(donor,'_',CTgene))
+
+cts.B <- md.B %>%
+  dplyr::filter(!is.na(CTaa) & !grepl('^NA_|_NA$',CTaa)) %>%
+  dplyr::group_by(dataset,donor,CTaa) %>%
+  dplyr::summarise(n=n(),
+                   ns=n_distinct(stage),
+                   stages=paste0(unique(stage),collapse=',')) %>%
+  dplyr::filter(ns > 1,!grepl('T0',stages)) %>%
+  dplyr::pull(CTaa)
+ncts.B <- length(unique(cts.B))
+
+ncts_per_donor.B <- md.B %>%
+  dplyr::filter(!is.na(CTaa) & !grepl('^NA_|_NA$',CTaa)) %>%
+  dplyr::group_by(dataset,donor,CTaa) %>%
+  dplyr::summarise(n=n(),
+                   ns=n_distinct(stage),
+                   stages=paste0(unique(stage),collapse=',')) %>%
+  dplyr::filter(ns > 1,!grepl('T0',stages)) %>% 
+  dplyr::group_by(dataset,donor) %>% 
+  dplyr::summarise(n=n()) %>%
+  dplyr::pull(n,donor)
+
+set.seed(0)
+ct_colors.B <- hcl(h=seq(15, 375, length = ncts.B+1),l = 65, c = 100)[sample(1:ncts.B,ncts.B)]
+names(ct_colors.B) <- unique(cts.B)
+
+cts_here.B <- md.B %>%
+  dplyr::filter(predicted.celltype.l1=='B',!is.na(CTaa),!grepl('NA',CTaa)) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n()) %>%
+  dplyr::group_by(dataset,donor,stage,CTaa) %>%
+  dplyr::summarise(n=n(),ntot=mean(ntot)) %>%
+  dplyr::mutate(frac=n/ntot) %>%
+  dplyr::filter(frac >= .01,n > 1) %>% 
+  dplyr::pull(CTaa)
+
+tmp <- rep('gray80',length(setdiff(cts_here.B,names(ct_colors.B))))
+names(tmp) <- setdiff(cts_here.B,names(ct_colors.B))
+ct_colors_here.B <- c(ct_colors.B,tmp)
+
+md.B %>%
+  dplyr::filter(dataset=='ASCT') %>% #, stage!='T0') %>%
+  dplyr::filter(predicted.celltype.l1=='B') %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n(),
+                stage=factor(stage,levels=c('T0','T1','T2'))) %>%
+  dplyr::filter(CTaa %in% c(cts_here.B,cts.B)) %>%
+  dplyr::mutate(CTaa=factor(CTaa,levels=names(ct_colors_here.B))) %>%
+  dplyr::group_by(dataset,donor,stage,sample,CTaa) %>%
+  dplyr::summarise(n=n(),ntot=mean(ntot)) %>%
+  dplyr::mutate(frac=n/ntot) %>%
+  rowwise() %>%
+  dplyr::mutate(donor=paste0(donor,'\n',if (donor %in% names(ncts_per_donor.B)) ncts_per_donor.B[[donor]] else '0',' new')) %>% 
+  ggplot(aes(x = stage, fill = CTaa, group = CTaa,
+             stratum = CTaa, alluvium = CTaa,
+             y = 100*frac, label = CTaa)) +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.position='none',
+        legend.text=element_text(size=6),
+        strip.background = element_rect(color = "black", fill=NA, size = 0),
+        legend.key.size=unit(3,'mm')) +
+  geom_col(width=.3,color='black',size=.1) +
+  geom_flow(stat = "alluvium") +
+  scale_fill_manual(values=ct_colors_here.B) +
+  labs(y='% B cells',fill='') + 
+  facet_grid(~donor)  
+```
+
+where are these clonotypes
+
+```{r umap_new_clones_B,fig.width=3,fig.height=3, dev=c('png')}
+pbmc.B %>%
+  dplyr::filter(dataset=='ASCT') %>%
+  dplyr::mutate(CTaa=paste0(donor,'_',CTgene),
+                CTaa=factor(ifelse(is.na(CTaa) | !(predicted.celltype.l1 %in% c('B')), 'none',
+                                   ifelse(CTaa %in% cts.B, CTaa, 'other')),
+                            levels=rev(c(cts.B,'other','none')))) %>% 
+  dplyr::arrange(CTaa) %>% #dplyr::pull(CTaa) %>% table()
+  ggplot(aes(x=refUMAP_1,y=refUMAP_2,color=CTaa)) +
+  geom_point(aes(size=CTaa)) +
+  geom_segment(data=anno,
+               aes(x=x,y=y,xend=xend,yend=yend),
+               arrow=arrow(length=unit(1.5,'mm')),colour='black',size=.5,inherit.aes=FALSE) +
+  geom_text(data=anno_text,
+            aes(x=x,y=y,label=label,angle=angle),size=2.,inherit.aes=FALSE) +
+  theme_void() +
+  coord_fixed() +
+  scale_size_manual(values=setNames(c(rep(.5,length(cts.B)),.1,.1),c(cts.B,c('none','other')))) +
+  scale_color_manual(values=c(ct_colors.B,c('none'='gray80','other'='gray50'))) +
+  theme(legend.key.size=unit(3,'mm')) +
+  theme(legend.position='none') +
+  labs(title='')
+```
+
+phenotype distribution: most of the new clones are naive B cells
+
+```{r BCR_phenotype_distribution,fig.width=3.5,fig.height=2.25}
+pbmc.B %>%
+  dplyr::filter(predicted.celltype.l1=='B',dataset=='ASCT') %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(ntot=n(),
+                CTaa=paste0(donor,'_',CTgene)) %>%
+  dplyr::mutate(traceability=factor(ifelse(CTaa %in% cts.B, 'new','other'),
+                                    levels=c('new','other'))) %>%
+  dplyr::group_by(dataset,donor,stage,celltype,traceability) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage,traceability) %>%
+  dplyr::mutate(frac=n/sum(n),
+                celltype=factor(celltype,levels=c('B Naive','B Intermediate','B Memory','Plasmablast'))) %>%
+  ggplot(aes(x=stage,y=100*frac,color=celltype)) + 
+  geom_jitter(width=.1) + 
+  stat_summary(aes(y = 100*frac,color=celltype,group=celltype), fun.y=mean, geom="line", na.rm=TRUE, size=1) +
+  scale_color_manual(values=celltype_colors,na.value='gray90',limits=force) +
+  scale_fill_manual(values=celltype_colors,na.value='gray90',limits=force) +
+  scale_shape_manual(values=donor_shapes) +
+  facet_grid(~traceability,scales='free_x',space='free_x') +
+  theme_classic() +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.key.size=unit(3.,'mm'),
+        legend.box='horizontal',
+        legend.position='right',
+        legend.box.margin=unit(c(-5,-10,-0,-5),'mm'),
+        strip.background = element_rect(color = "black", fill=NA, size = 0)) +
+  guides(fill=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         color=guide_legend(override.aes=list(pch=22,stroke=0,size=3),ncol=1),
+         shape=guide_legend(ncol=1)) +
+  labs(y='% B cells',x='',fill='',color='',shape='')
+```
+
+```{r B_cloneType_distribution_pie,fig.width=4,fig.height=2.5}
+pbmc.B %>%
+  dplyr::filter(predicted.celltype.l1=='B', !is.na(CTaa), dataset=='ASCT') %>%
+  dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post')),
+                CTaa=paste0(donor,'_',CTgene),
+                traceability=factor(ifelse(CTaa %in% cts.B, 'new','other'),
+                                    levels=c('new','other'))) %>%
+  dplyr::group_by(dataset,stage,traceability,cloneType) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::mutate(frac=n/sum(n)) %>%
+  ggplot(aes(x='',y=100*frac,fill=cloneType)) + 
+  geom_bar(stat='identity',width=.25,color='black') + 
+  facet_grid(stage~traceability, switch='y') + #,scales='free_x',space='free_x') +
+  scale_fill_manual(values=cloneType_colors) + 
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.key.size=unit(3,'mm'),
+        strip.background=element_blank(),
+        strip.text.y=element_text(angle=90,hjust=.5,vjust=.5),
+        axis.text.x=element_blank()) +
+  labs(x='',y='',fill='')
+```
+
+compare IGHV gene usage before and after vaccination for our dataset
+
+```{r B_IGHV_distribution,fig.width=3.5,fig.height=2.25}
+ighv.usage <- pbmc.B %>%
+  dplyr::filter(predicted.celltype.l1=='B',!is.na(CTgene),!grepl('_NA$|^NA_',CTgene)) %>%
+  dplyr::mutate(ighv=gsub('.*IGH(V[0-9]*-[0-9]*).*$','\\1',CTstrict)) %>% 
+  dplyr::group_by(dataset,donor,stage,sample,ighv) %>%
+  dplyr::summarise(n=n()) %>%
+  dplyr::group_by(dataset,donor,stage) %>%
+  dplyr::mutate(frac=n/sum(n),
+                ntot=sum(n),
+                stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))) %>% 
+  dplyr::group_by(dataset,ighv) %>%
+  dplyr::mutate(nstage=n_distinct(stage),
+                ndonor=n_distinct(donor)) %>%
+  dplyr::ungroup() 
+
+pvals.ighv <- ighv.usage %>%
+  dplyr::filter(nstage > 1, ndonor > 1) %>% 
+  nest(data = -c(dataset,ighv)) %>% 
+  mutate(
+    fit = map(data, ~ glm(cbind(n,ntot-n) ~ stage, data = .x, family='binomial')),
+    tidied = map(fit, tidy)
+  ) %>% 
+  unnest(tidied) %>%
+  dplyr::select(dataset,ighv,term,estimate,p.value) %>%
+  dplyr::mutate(padj=p.adjust(p.value, method='BH')) %>%
+  dplyr::filter(term=='stagepost') 
+
+sig.ighv <- pvals.ighv %>% 
+  dplyr::filter(dataset=='ASCT', estimate > 0) %>% 
+  dplyr::slice_min(padj, n=5) %>% 
+  dplyr::pull(ighv)
+
+ggplot(ighv.usage %>% dplyr::filter(dataset=='ASCT', ighv %in% sig.ighv), aes(x=ighv,y=100*frac)) +
+  geom_boxplot(aes(fill=stage),position=position_dodge(.8)) +
+  geom_point(aes(color=donor,group=stage),position=position_dodge(.8)) +
+  geom_text(data=pvals.ighv %>% dplyr::filter(dataset=='ASCT', ighv %in% sig.ighv),
+            aes(x=ighv,y=Inf,label=ifelse(padj < .05, stars.pval(padj), 'n.s.')),
+            size=2, hjust=0.5,vjust=0) +
+  theme_classic() +
+  scale_color_manual(values=donor_colors) +
+  scale_fill_manual(values=stage_colors) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        strip.background=element_blank(),
+        strip.placement='outside',
+        legend.key.size=unit(3,'mm')) +
+  coord_cartesian(clip='off') +
+  labs(x='',y='% B cells',fill='',color='')
+```
+
+# differential expression
+
+now look at gene expression for all cells of a celltype (level 1)
+
+```{r pseudobulk_counts}
+expr <- list()
+all.genes <- Reduce(intersect, lapply(pbmc, row.names))
+for (lib in libraries) {
+  for (sample in samples[[lib]]) {
+    for (celltype in c('B','CD4 T','CD8 T','NK')) {
+      cells <- Cells(pbmc[[lib]])[(pbmc[[lib]]$predicted.celltype.l1==celltype) & (pbmc[[lib]]$sample==sample)]
+      if (length(cells) > 1) {
+        expr[[paste0(sample,':',celltype)]] <- rowSums(pbmc[[lib]]@assays$RNA@counts[all.genes,cells])
+      }
+    }      
+    cells <- Cells(pbmc[[lib]])[(pbmc[[lib]]$sample==sample)]
+    if (length(cells) > 1) {
+      expr[[paste0(sample,':all')]] <- rowSums(pbmc[[lib]]@assays$RNA@counts[all.genes,cells])
+    }
+  }
+}
+
+colData <- data.frame(sample=gsub(':.*','',names(expr)),
+                      celltype=gsub('.*:','',names(expr)),
+                      row.names=names(expr)) %>%
+  dplyr::left_join(pbmc_meta_all %>% dplyr::distinct(sample,stage,donor,dataset),by='sample') %>%
+  dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),
+                             levels=c('pre','post')),
+                setting=factor(ifelse(dataset %in% c('ASCT','ASCT_C'),'A','H'),
+                               levels=c('H','A')),
+                group=factor(paste0(setting,stage),
+                             levels=c('Hpre','Apre','Hpost','Apost')),
+                vacc=factor(ifelse(dataset %in% c('ASCT','HD1','HD2'),'yes','no')))
+
+counts <- do.call(cbind,expr)
+use.genes <- Reduce(`&`, lapply(unique(colData$dataset), function(ds) rowSums(counts[,colData$dataset==ds]) > 0))
+```
+
+run a celltype-specific PCA pre-vaccination
+
+```{r PCA_expression,fig.width=7.5,fig.height=2.5}
+pl <- list()
+for (ct in c('B','CD4 T','CD8 T')) {
+  take_row <- (rowSums(counts) > 0) & use.genes 
+  take_col <- (colSums(counts) > 0) & (colData$celltype==ct) & (colData$stage=='pre')
+  dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                colData=colData[take_col,,drop=FALSE],
+                                design=~dataset) %>% DESeq()
+  
+  rld.all <- DESeq2::vst(dds, blind=TRUE)
+  
+  rv <- rowVars(assay(rld.all))
+  genes <- order(rv, decreasing=TRUE)[seq_len(500)]
+  mat <- t(scale(t(assay(rld.all)[genes,])))
+  pca <- prcomp(t(mat))
+  
+  percentVar <- round(100*pca$sdev^2 / sum( pca$sdev^2 ),2)
+  df <- cbind(data.frame(pca$x), colData(rld.all)[,c('sample','celltype','stage','donor','dataset','setting')])
+  
+  pl[[ct]] <- ggplot(df,  aes(x=PC1, y=PC2, shape=dataset,fill=setting)) +
+    geom_point(size=3,stroke=1) +
+    labs(x=paste0("PC1: ", percentVar[1], "% variance"),
+         y=paste0("PC2: ", percentVar[2], "% variance"),
+         color='',fill='',shape='',title=paste0(ct, ' cells')) + 
+    theme_classic() +
+    theme(legend.key.size=unit(3.5,'mm'),
+          legend.spacing=unit(1,'mm'),
+          legend.title=element_blank()) +
+    scale_shape_manual(values=dataset_shapes) + 
+    scale_fill_manual(values=c('A'='red3','H'='darkseagreen3'), labels=c('HD','ASCT')) +
+    guides(fill=guide_legend(override.aes=list(pch=22,stroke=0,color='white',size=4)),
+           shape=guide_legend(override.aes=list(fill='gray',size=2.5))) 
+}
+
+plot_grid(plotlist=c(lapply(pl, function(x) x + theme(legend.position='none')),
+                     list(legend=get_legend(pl[['B']]))), align='vh',ncol=4, rel_widths=c(.3,.3,.3,.1))
+```
+
+
+now we run differential gene expression on the data
+
+- "AvsH": allo vs. healthy (all datasets, only T0)
+- "Hstage": healthy post vs. pre-vaccination
+- "Astage": allo post vs. pre-vaccination
+
+```{r pseudobulk_DE, eval=TRUE}
+res <- list()
+take_row <- (rowSums(counts) > 0) & use.genes
+for (celltype in c('B','CD8 T','CD4 T')) {
+  take_col <- (colSums(counts) > 0) & (colData$celltype==celltype) & (colData$stage=='pre')
+  cD <- colData[take_col,,drop=FALSE]
+  dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                colData=cD,
+                                design=~setting) %>%
+    DESeq()
+  res[[paste0(celltype,'_AvsH')]] <- lfcShrink(dds,
+                                                contrast=c('setting','A','H'),
+                                                type='normal',
+                                                format='DataFrame') %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column('gene_name') %>%
+    dplyr::mutate(contrast=paste0(celltype,'_AvsH'))
+
+  take_col <- (colSums(counts) > 0) & (colData$celltype==celltype) & (colData$dataset!='ASCT') & (colData$vacc=='yes')
+  cD <- colData[take_col,,drop=FALSE]
+  dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                colData=cD,
+                                design=~stage) %>%
+    DESeq()
+  res[[paste0(celltype,'_Hstage')]] <- lfcShrink(dds,
+                                                 contrast=c('stage','post','pre'),
+                                                 type='normal',
+                                                 format='DataFrame') %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column('gene_name') %>%
+    dplyr::mutate(contrast=paste0(celltype,'_Hstage'))
+
+  take_col <- (colSums(counts) > 0) & (colData$celltype==celltype) & (colData$dataset=='ASCT') & (colData$vacc=='yes')
+  cD <- colData[take_col,,drop=FALSE]
+  dds <- DESeqDataSetFromMatrix(countData=counts[take_row,take_col],
+                                colData=cD,
+                                design=~stage) %>%
+    DESeq()
+  res[[paste0(celltype,'_Astage')]] <- lfcShrink(dds,
+                                                 contrast=c('stage','post','pre'),
+                                                 type='normal',
+                                                 format='DataFrame') %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column('gene_name') %>%
+    dplyr::mutate(contrast=paste0(celltype,'_Astage'))
+}
+
+pseudobulk <- do.call(rbind,res)
+write.csv(pseudobulk,file=file.path('tables','pseudobulk_DE.csv'))
+```
+
+check specifically exhaustion markers
+
+```{r DE_exhaustion,fig.width=3.5,fig.height=2.5}
+pseudobulk <- read.csv(file.path('tables','pseudobulk_DE.csv'),row.names=1,header=1) %>%
+  dplyr::mutate(celltype=gsub('_.*','',contrast),
+                contrast=gsub('.*_','',contrast)) 
+
+exhaustion_genes <- c('LAG3','TIGIT','PDCD1','CTLA4','HAVCR2','TOX')
+ggplot(pseudobulk %>%
+         dplyr::filter(gene_name %in% exhaustion_genes, contrast %in% c('AvsH')),
+       aes(y=gene_name,x=celltype,shape=padj < .05,size=-log10(padj),color=log2FoldChange)) +
+  geom_point() +
+  scale_size_continuous(name='adj. p-value',
+                        breaks=c(3,6,9),
+                        labels=c(1e-3,1e-6,1e-9),
+                        limits=c(0,15)) +
+  scale_color_gradient2(low='blue3',mid='gray',high='red3',
+                        limits=c(-3,3),oob=scales::squish) +
+  scale_shape_manual(values=c(1,19)) +
+  coord_cartesian(clip = 'off') +
+  theme_minimal(base_size=10) +
+  coord_flip() +
+  guides(shape=FALSE) +
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.box='vertical',
+        legend.title=element_text(hjust=.5,size=10),
+        legend.key.size=unit(3,'mm'),
+        legend.position='right',
+        strip.placement='outside') +
+  labs(x='',y='',color='log2 fold change')
+```
+
+check vaccine induced gene module from Table S3 of Zhang et al.
+
+```{r VI_GEM,fig.width=3,fig.height=2.25}
+VI_GEM <- c('ACTG1','PCLAF','ACTB','GAPDH','CD38','GZMH','PFN1','CORO1A','PYCARD','PSMB8','TMSB10','ARPC3','CLIC1','CD52','TMSB4X','APOBEC3H',
+            'ADA','SEM1','MYL6','GZMA','DECR1','ARPC2','NOP10','APOBEC3C','LGALS1','GZMB','CFL1','CLTA','TWF2','ISG15','MXD4','SUB1','PSMA4','HLA-DRA',
+            'PPP1R18','GSTO1','APOBEC3G','ARPC5','UCP2','PSMA5','WDR1','ARHGDIB','YWHAE','CCL5','SLC25A5','PSMB4','ITGB1','DYNLL1','ARPC4','ATP5MC2',
+            'FGFBP2','GTF3C6','RGS10','ATP6V1D','S1PR4','EZH2','ATP5F1A','GMFG','OSTF1','PRF1','ABRACL','GLRX','ACTR3','SIT1','TXNDC17','H3F3A',
+            'CCDC28B','ATP5MG','DNAJC15','IDH2','SEC11A','FABP5','CAPZB','DBI','IFI16','DCTN2','COTL1','CNN2','CHMP2A','ATP5MC3','ARPC1B','NDUFS2','MT1E',
+            'MRPL28','OAS2','SERPINB1','CARHSP1','TIMD4','UBE2L6','MYL6B','DCTN3','IRF4','ANXA5','ATP5F1B','GIMAP4','PSMB2','NDUFB3','NCOA4','YARS',
+            'CARD16','COX5A','FKBP1A','TCEAL8','CLDND1','NDUFB5','ATP5F1C','MRPL42','RPA3','MT1F','NUDT5','POLR2G','LDHB','GBP1','ATP5MF','COX6B1',
+            'COX6C','SUCLG1','TAP1','CLIC3','TPM4','GBP2','NDUFC2','CHCHD1','PPP1CA','TKT','SH3BGRL3','EIF4E2','LAIR2','MRPL51','TRAPPC1','CSK','BCL2L11',
+            'LIMD2','JPT1','GTF2H5','NDUFA12','TROAP','RTRAF','ZYX','RAC2','CHCHD5','MPG','RPS6KA1','SRSF9','CEBPD','GIMAP1','COPZ1','TALDO1','CALM3',
+            'EIF2S2','HLA-DMA','POMP','PTRHD1','COMMD4','GGCT','HAVCR2','LAP3','FERMT3','COPS9','QARS','AP2S1','ZNHIT1','ICA1','HADHB','BLOC1S1','RABL3',
+            'IFI27L2','RACK1','CD27','FKBP3','MRPL10','TXNDC9','FIBP','PTTG1','PSMD8','CXCR3','PSME1','LCP1','ACAA2','CHI3L2','NCKAP1L','PPP4C','IGBP1',
+            'PSMB3','LAMTOR2','ARHGAP30','TMEM256','COPB2','AC010618.1','AP1S1','PFDN4','NT5C3A','HMGA1','MT-CO1','PSMA2','NSMCE1','PARK7')
+
+VI_GEM_scores <- lapply(pbmc, function(sobj) AddModuleScore(sobj, features=list(VI_GEM=VI_GEM))@meta.data %>%
+                          dplyr::mutate(VI_GEM_score=Cluster1) %>%
+                          dplyr::select(orig.ident,dataset,donor,stage,predicted.celltype.l1,predicted.celltype.l2,celltype,VI_GEM_score)) %>%
+  do.call(rbind,.)
+
+
+pv <- list()
+for (ds in c('ASCT','HD1','HD2')) {
+  tmp <- VI_GEM_scores %>% dplyr::filter(dataset==ds,predicted.celltype.l1 %in% c('CD8 T')) %>%
+    dplyr::group_by(predicted.celltype.l1,dataset,donor,stage) %>%
+    dplyr::summarise_if(is.numeric,mean) %>%
+    dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post')))
+  mod <- glm(VI_GEM_score ~ donor + stage, data=tmp)
+  coef <- summary(mod)$coefficients
+  pv[[ds]] <- data.frame(pval=coef['stagepost',4],
+                         dataset=ds) %>%
+    dplyr::mutate(p=stars.pval(pval))
+}
+
+tmp <- VI_GEM_scores %>% dplyr::filter(predicted.celltype.l1 %in% c('CD8 T'), dataset %in% c('ASCT','HD1','HD2')) %>%
+  dplyr::group_by(predicted.celltype.l1,dataset,donor,stage) %>%
+  dplyr::summarise_if(is.numeric,mean) %>%
+  dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post')))
+mod <- glm(VI_GEM_score ~ dataset=='ASCT', data=tmp)
+coef <- summary(mod)$coefficients
+
+VI_GEM_scores %>%
+  dplyr::filter(predicted.celltype.l1=='CD8 T', dataset %in% c('ASCT','HD1','HD2')) %>% #grepl('CD8 T',celltype)) %>%
+  dplyr::group_by(predicted.celltype.l1,dataset,donor,stage) %>%
+  dplyr::summarise_if(is.numeric,mean) %>%
+  dplyr::mutate(dataset=factor(dataset,levels=c('ASCT','HD1','HD2'))) %>%
+  ggplot(aes(x=stage,y=VI_GEM_score,color=dataset)) +
+  geom_boxplot() +
+  geom_point(color='gray') +
+  geom_line(aes(group=donor),color='gray') +
+  geom_text(data=do.call(rbind,pv) %>% dplyr::mutate(stage='T1',
+                                                     dataset=factor(dataset,levels=c('ASCT','HD1','HD2')),
+                                                     donor='dummy'),
+            aes(y=Inf,label=paste0('p=',signif(pval,2))),color='black',size=3) +
+  facet_wrap(~dataset) +
+  scale_color_manual(values=dataset_colors) +
+  theme_classic() +
+  theme(strip.background=element_blank(),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.position='none') +
+  coord_cartesian(clip='off') +
+  labs(x='',y='VI GEM score\nin CD8 T cells')
+```
+
+show volcano plots for the comparison of post-vs-pre
+
+```{r DE_Astage_volcano,fig.width=5,fig.height=2.5}
+pseudobulk %>%
+  dplyr::filter(contrast=='Astage',
+                baseMean > 1,
+                !is.na(log2FoldChange),
+                !is.na(padj),
+                !grepl('RP[LS]|HIST|TR[AB][VDJ]',gene_name),
+                celltype %in% c('B','CD4 T','CD8 T')) %>%
+  ggplot(aes(x=log2FoldChange,y=-log10(pvalue),color=padj < .05,label=ifelse((padj < .05),gene_name,''))) +
+  geom_point(size=.5) +
+  geom_text_repel(segment.alpha=.5,segment.size=.25,size=2.5,max.overlaps=10,nudge_y=1) +
+  theme_classic() +
+  scale_color_manual(values=c('black','red')) +
+  facet_wrap(~celltype,ncol=3) +
+  theme(strip.background=element_blank(),
+        legend.position='none') +
+  labs(x='log2 fold change post- vs. pre-vaccination',y='-log10 p-value',color='')
+
+```
+
+<!-- compare these results to what we got in the Frontiers paper -->
+
+<!-- ```{r compare_frontiers} -->
+<!-- pbmc_frontiers <- readRDS("/data/cephfs-2/mirrored/groups/cubi/projects/2019/2019-12-09_Na_ARTE/obermayer_et_al_tcell_persistence/data/seurat/pbmc_all.rds") -->
+<!-- ``` -->
+
+run gene set enrichment analysis using `tmod` on these results, using Hallmark, Reactome, KEGG and GO BP gene setes
+
+```{r tmod, eval=TRUE}
+library(tmod)
+msig <- tmodImportMSigDB(file.path('msigdb_v7.2.xml'))
+sel <- ((msig$gs$Category %in% c("H"))  | (msig$gs$Subcategory %in% c('CP:REACTOME','GO:BP','CP:KEGG'))) & (msig$gs$B > 10) & (msig$gs$B < 100)
+log10pval <- pseudobulk %>%
+  dplyr::mutate(group=paste0(contrast,'_',celltype)) %>%
+  dplyr::mutate(log10pval=ifelse(!is.na(log2FoldChange) & !is.na(pvalue),
+                                 -sign(log2FoldChange)*log10(pvalue), NA)) %>%
+  dplyr::select(gene_name,group,log10pval) %>%
+  dplyr::filter(!is.na(log10pval)) %>%
+  spread(group,log10pval) %>%
+  tibble::column_to_rownames('gene_name') %>%
+  dplyr::slice(sample(1:n()))
+
+sorted_genes <- list()
+for (contrast in colnames(log10pval)) {
+  genes_up <- row.names(log10pval)[order(log10pval[[contrast]],decreasing=TRUE,na.last=NA)]
+  genes_up[log10pval[genes_up,contrast] <= 0] <- sample(genes_up[log10pval[genes_up,contrast] <= 0])
+  sorted_genes[[paste0(contrast,'_up')]] <- genes_up
+  genes_down <- row.names(log10pval)[order(log10pval[[contrast]],decreasing=FALSE,na.last=NA)]
+  genes_down[log10pval[genes_down,contrast] >= 0] <- sample(genes_down[log10pval[genes_down,contrast] >= 0])
+  sorted_genes[[paste0(contrast,'_down')]] <- genes_down
+}
+
+tmods <- do.call(rbind,lapply(sorted_genes,function(x) tmodCERNOtest(x,mset=msig[sel])))
+
+write.csv(tmods %>%
+            tibble::rownames_to_column('tmp') %>%
+            dplyr::mutate(dataset=gsub('\\..*','',tmp)) %>%
+            dplyr::mutate(celltype=gsub('.*_([^_]*)_.*','\\1',dataset),
+                          contrast=gsub('_.*','',dataset)),
+          file=file.path('tables','pseudobulk_tmod.csv'))
+```
+
+the gene set enrichment analysis shows strong difference between healthy and alloHSCT mainly in CD4 T cells (GvHD, allograft rejection, PD-1 signaling)
+
+```{r plot_tmod,fig.width=12,fig.height=6.}
+tmods <- read.csv(file.path('tables','pseudobulk_tmod.csv'),header=1,row.names=1)
+tmods %>%
+  dplyr::filter(adj.P.Val < 1.e-5, AUC > .7, contrast %in% c('AvsH'),!grepl('MRNA',toupper(Title))) %>% 
+  dplyr::group_by(contrast,celltype,Title) %>%
+  dplyr::slice_min(adj.P.Val,n=1) %>%
+  dplyr::mutate(padj=ifelse(grepl('_up$',dataset),-log10(adj.P.Val),log10(adj.P.Val)),
+                contrast=factor(contrast,levels=c('AvsH'))) %>%
+  ggplot(aes(x=celltype,y=toupper(Title),color=padj,size=AUC)) + 
+  geom_point() + 
+  scale_color_gradient2(low='blue3',mid='gray',high='red3',limits=c(-10,10),breaks=c(-10,0,10),
+                        labels=c('1e-10 (down)','','1e-10 (up)'),oob=scales::squish) +
+  theme_minimal() + 
+  theme(strip.background=element_blank(),
+        strip.clip='off',
+        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.key.size=unit(3,'mm')) + 
+  labs(x='',y='')
+```
+
+```{r sessionInfo,cache=FALSE}
+sessionInfo()
+```
+

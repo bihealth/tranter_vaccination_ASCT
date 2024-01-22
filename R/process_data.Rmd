@@ -1,0 +1,140 @@
+---
+title: "process data"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, cache.lazy=FALSE, message=FALSE, warning=FALSE)
+library(sctransform)
+library(Seurat)
+library(SeuratDisk)
+library(ggplot2)
+library(cowplot)
+library(ggrepel)
+library(dplyr)
+library(tidyr)
+options(future.globals.maxSize = 10 * 1024 * 1024^2)
+```
+
+we follow the [recent paper](https://zenodo.org/record/7555405) and use their data as reference:
+
+```{r get_reference, fig.width=6,fig.height=5}
+reference <- readRDS(file.path("seurat","PBMC_vaccine_CITE.rds"))
+```
+
+load PBMC data; take all cells with less than 10% mitochondrial RNA and between 250 and 5000 genes
+
+- P1-T1
+- P1-T2
+- P1-T3
+- P2-T1
+- P2-T2
+- P2-T3
+- P3-T1
+- P3-T2
+- P3-T3
+
+```{r get_data}
+samples <- c("P1-T1","P1-T2","P1-T3","P2-T1","P2-T2","P2-T3","P3-T1","P3-T2","P3-T3")
+
+pbmc <- list()
+for (sample in samples) {
+  dge <- Read10X_h5(file.path('cellranger', paste0(sample,'filtered_counts.h5'))
+  sobj <- CreateSeuratObject(counts = dge, project=sample)
+  sobj[['pct.mito']] <- PercentageFeatureSet(sobj, pattern='^MT-')
+  sobj <- subset(sobj, (pct.mito < 10) & (nFeature_RNA <= 5000) & (nFeature_RNA >= 250))
+  capture.output(sobj <- SCTransform(sobj, verbose = FALSE),file='/dev/null')
+  pbmc[[sample]] <- sobj
+}
+```
+
+get some QC metrics
+
+```{r QC,fig.width=10,fig.height=5}
+md <- do.call(rbind, lapply(names(pbmc), function(x) pbmc[[x]]@meta.data[,c('nCount_RNA','nFeature_RNA','pct.mito')] %>%
+                              dplyr::mutate(orig.ident=x))) %>%
+  dplyr::group_by(orig.ident) %>%
+  dplyr::mutate(orig.ident=paste0(orig.ident,' (n=',n(),')')) %>%
+  gather(metric,value,-orig.ident)
+
+ggplot(md,aes(x=orig.ident,y=value,fill=orig.ident)) + 
+  geom_violin(scale='width') +
+  facet_wrap(~metric,scales='free_y') + 
+  theme_classic() + 
+  theme(axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
+        legend.position='none') + 
+  labs(x='',y='')
+
+```
+
+project our cells onto this reference embedding using RNA data; predict cell type labels for the level 1, level 2 and level 3 clustering of the reference
+
+```{r project}
+for (sample in samples) {
+  anchors <- FindTransferAnchors(
+    reference = reference,
+    query = pbmc[[sample]],
+    normalization.method = "SCT",
+    reference.reduction = "spca",
+    dims = 1:50,
+    k.anchor = 5,
+    verbose=FALSE)
+  pbmc[[sample]] <- MapQuery(
+    anchorset = anchors,
+    query = pbmc[[sample]],
+    reference = reference,
+    refdata = list(
+      celltype.l1 = "celltypel1",
+      celltype.l2 = "celltypel2",
+      celltype.l3 = "celltypel3"
+    ),
+    reference.reduction = "spca", 
+    reduction.model = "wnn.umap",
+    verbose=FALSE)
+}
+```
+
+identify and remove putative doublets (shown in pink), and cells with prediction score < .75
+
+```{r doublets,fig.width=10,fig.height=12}
+source(file.path('R','my_doubletFinder.R'))
+pbmc <- lapply(pbmc, function(sobj) {
+  DefaultAssay(sobj) <- 'RNA'
+  Idents(sobj) <- 'predicted.celltype.l1'
+  homotypic.prop <- modelHomotypic(Idents(sobj))
+  nExp_poi <- round(0.05*nrow(sobj@meta.data)) 
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  tmp <- my_doubletFinder(sobj, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE)
+  tmp <- my_doubletFinder(tmp, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi.adj, reuse.pANN = "pANN")
+  AddMetaData(sobj, tmp@meta.data[,'DF.classifications',drop=FALSE])
+})
+
+do.call(rbind,lapply(pbmc, function(sobj) table(sobj$DF.classifications))) %>%
+  DT::datatable()
+
+plots <- lapply(names(pbmc), function(sample)
+  DimPlot(pbmc[[sample]], group.by='DF.classifications',
+          cols=c('Singlet'='gray',
+                 'Doublet'='deeppink')) +
+    theme_void() + 
+    labs(title=sample) + 
+    theme(legend.position='none'))
+
+plot_grid(plotlist=plots,ncol=5,align='vh')
+
+pbmc.sub <- lapply(pbmc, function(x) subset(x, subset=(DF.classifications=='Singlet') & (predicted.celltype.l1.score >= .75)))
+```
+
+```{r save}
+for (sample in samples) {
+  saveRDS(pbmc.sub[[sample]], file.path('seurat',paste0(sample,'.rds')))
+}
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
+
