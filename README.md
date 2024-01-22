@@ -61,10 +61,15 @@ data
 │        └── donor_ids.tsv
 ├── seurat
 │   └── PBMC_vaccine_CITE.rds
-└── tables
+└── misc
+    └── msigdb_v7.2.xml
 ```
 
-## Seurat processing
+## Cellranger processing
+
+for PRJNA767017, run cellranger like so: `cellranger multi --id=cellranger_${lib} --csv=${lib}.csv --jobmode=slurm --maxjobs=100 --jobinterval=1000 ` where `lib` is `Vacc_pre` or `Vacc_post`
+
+## Seurat 
 
 run `R/process_data.Rmd` for this data, `R/process_GES222633.Rmd` for GSE222633, `R/process_OMIX001295.Rmd` for OMIX001295 and `R/process_PRJNA767017.Rmd` for PRJNA767017
 

@@ -46,10 +46,10 @@ libraries <- c("P1-T1","P1-T2","P1-T3","P2-T1","P2-T2","P2-T3","P3-T1","P3-T2","
 datasets <- c(rep('ASCT', 9),
               rep('HD1', 2),
               rep('HD2', 18),
-              rep('HD_C',9),
-              rep('ASCT_C',6))
+              rep('HD_C',7),
+              rep('ASCT_C',4))
 names(datasets) <- libraries
-pbmc <- lapply(libraries, function(lib) readRDS(file.path('seurat',paste0(lib,'.rds'))))
+pbmc <- lapply(libraries, function(lib) readRDS(file.path('..','seurat',paste0(lib,'.rds'))))
 names(pbmc) <- libraries
 
 for (lib in libraries) {
@@ -98,11 +98,11 @@ add clonotype information
 
 ```{r add_clonotypes}
 samples <- lapply(pbmc, function(x) unique(as.character(x$sample)))
-if (FALSE) {
+if (TRUE) {
   tcr_combined <- list()
   bcr_combined <- list()
   for (lib in libraries) {
-    infile <- file.path('vdj','tcr',paste0(lib,'_annotations.csv'))
+    infile <- file.path('..','vdj','tcr',paste0(lib,'_annotations.csv'))
     if (file.exists(infile)) {
       tcr <- read.csv(infile,
                       stringsAsFactors=FALSE)
@@ -113,7 +113,7 @@ if (FALSE) {
                                              filterMulti=TRUE)[[1]] 
       }
     }
-    infile <- file.path('vdj','bcr',paste0(lib,'_annotations.csv'))
+    infile <- file.path('..','vdj','bcr',paste0(lib,'_annotations.csv'))
     if (file.exists(infile)) {
       bcr <- read.csv(infile,
                       stringsAsFactors=FALSE) 
@@ -127,11 +127,11 @@ if (FALSE) {
     }
   }
   
-  saveRDS(tcr_combined,file.path('seurat','tcr_combined_all.rds'))
-  saveRDS(bcr_combined,file.path('seurat','bcr_combined_all.rds'))
+  saveRDS(tcr_combined,file.path('..','seurat','tcr_combined_all.rds'))
+  saveRDS(bcr_combined,file.path('..','seurat','bcr_combined_all.rds'))
 } else {
-  tcr_combined <- readRDS(file.path('seurat','tcr_combined_all.rds'))
-  bcr_combined <- readRDS(file.path('seurat','bcr_combined_all.rds'))
+  tcr_combined <- readRDS(file.path('..','seurat','tcr_combined_all.rds'))
+  bcr_combined <- readRDS(file.path('..','seurat','bcr_combined_all.rds'))
 }
 
 pbmc_meta <- do.call(rbind,
@@ -736,38 +736,6 @@ df <- clonalDiversity(tcr_comb[smps], cloneCall='gene',group='sample', exportTab
                      dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
   dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
 
-pval1 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD1','Inv.Simpson'])$p.value
-pval2 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
-pval3 <- wilcox.test(df[df$dataset=='HD1','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
-
-ggplot(df, aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
-  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
-  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
-  geom_line(aes(group=donor),color='gray',size=.25) +
-  geom_text(data=data.frame(pval=pval1,
-                                Inv.Simpson=420,
-                                stage='T1',
-                                dataset=factor('HD1',levels=c('ASCT','HD1','HD2'))),
-                aes(label=stars.pval(pval1)),size=2.5, color='black') +
-  geom_text(data=data.frame(pval=pval2,
-                            Inv.Simpson=420,
-                            stage='T1',
-                            dataset=factor('HD2',levels=c('ASCT','HD1','HD2'))),
-            aes(label=stars.pval(pval2)),size=2.5, color='black') +
-  theme_classic() +
-  #scale_y_log10() +
-  facet_grid(.~dataset, scales='free_x', space='free_x') +
-  scale_color_manual(values=dataset_colors,guide=FALSE) +
-  theme(legend.key.size=unit(3.,'mm'),
-        legend.box='horizontal',
-        legend.position=c(.9,.25),
-        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
-        legend.title=element_blank(),
-        strip.background=element_blank(),
-        strip.clip = "off") +
-  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
-  labs(x='',shape='')
-
 ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))), 
        aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
   geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
@@ -1176,38 +1144,6 @@ df <- clonalDiversity(bcr_comb[smps], cloneCall='gene',group='sample', exportTab
                      dplyr::distinct(.,.keep_all=TRUE), by='sample') %>%
   dplyr::mutate(dataset=factor(dataset, levels=c('ASCT','ASCT_C','HD1','HD2','HD_C'))) 
 
-pval1 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD1','Inv.Simpson'])$p.value
-pval2 <- wilcox.test(df[df$dataset=='ASCT','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
-pval3 <- wilcox.test(df[df$dataset=='HD1','Inv.Simpson'],df[df$dataset=='HD2','Inv.Simpson'])$p.value
-
-ggplot(df, aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
-  geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
-  geom_point(aes(group=stage),pch=21,fill='white',color='gray',position=position_dodge(width=.5),size=2) + 
-  geom_line(aes(group=donor),color='gray',size=.25) +
-  geom_text(data=data.frame(pval=pval1,
-                                Inv.Simpson=115,
-                                stage='T1',
-                                dataset=factor('HD1',levels=c('ASCT','HD1','HD2'))),
-                aes(label=stars.pval(pval1)),size=2.5, color='black') +
-  geom_text(data=data.frame(pval=pval2,
-                            Inv.Simpson=115,
-                            stage='T1',
-                            dataset=factor('HD2',levels=c('ASCT','HD1','HD2'))),
-            aes(label=stars.pval(pval2)),size=2.5, color='black') +
-  theme_classic() +
-  #scale_y_log10() +
-  facet_grid(.~dataset, scales='free_x', space='free_x') +
-  scale_color_manual(values=dataset_colors,guide=FALSE) +
-  theme(legend.key.size=unit(3.,'mm'),
-        legend.box='horizontal',
-        legend.position=c(.9,.25),
-        axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
-        legend.title=element_blank(),
-        strip.background=element_blank(),
-        strip.clip = "off") +
-  guides(shape=guide_legend(override.aes=list(fill='white',stroke=.5,color='black',size=3))) +
-  labs(x='',shape='')
-
 ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels=c('pre','post'))), 
        aes(x=stage,y=`Inv.Simpson`,color=dataset)) + 
   geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
@@ -1575,13 +1511,13 @@ for (celltype in c('B','CD8 T','CD4 T')) {
 }
 
 pseudobulk <- do.call(rbind,res)
-write.csv(pseudobulk,file=file.path('tables','pseudobulk_DE.csv'))
+write.csv(pseudobulk,file=file.path('..','tables','pseudobulk_DE.csv'))
 ```
 
 check specifically exhaustion markers
 
 ```{r DE_exhaustion,fig.width=3.5,fig.height=2.5}
-pseudobulk <- read.csv(file.path('tables','pseudobulk_DE.csv'),row.names=1,header=1) %>%
+pseudobulk <- read.csv(file.path('..','tables','pseudobulk_DE.csv'),row.names=1,header=1) %>%
   dplyr::mutate(celltype=gsub('_.*','',contrast),
                 contrast=gsub('.*_','',contrast)) 
 
@@ -1697,17 +1633,11 @@ pseudobulk %>%
 
 ```
 
-<!-- compare these results to what we got in the Frontiers paper -->
-
-<!-- ```{r compare_frontiers} -->
-<!-- pbmc_frontiers <- readRDS("/data/cephfs-2/mirrored/groups/cubi/projects/2019/2019-12-09_Na_ARTE/obermayer_et_al_tcell_persistence/data/seurat/pbmc_all.rds") -->
-<!-- ``` -->
-
 run gene set enrichment analysis using `tmod` on these results, using Hallmark, Reactome, KEGG and GO BP gene setes
 
 ```{r tmod, eval=TRUE}
 library(tmod)
-msig <- tmodImportMSigDB(file.path('msigdb_v7.2.xml'))
+msig <- tmodImportMSigDB(file.path('..','misc','msigdb_v7.2.xml'))
 sel <- ((msig$gs$Category %in% c("H"))  | (msig$gs$Subcategory %in% c('CP:REACTOME','GO:BP','CP:KEGG'))) & (msig$gs$B > 10) & (msig$gs$B < 100)
 log10pval <- pseudobulk %>%
   dplyr::mutate(group=paste0(contrast,'_',celltype)) %>%
@@ -1736,15 +1666,20 @@ write.csv(tmods %>%
             dplyr::mutate(dataset=gsub('\\..*','',tmp)) %>%
             dplyr::mutate(celltype=gsub('.*_([^_]*)_.*','\\1',dataset),
                           contrast=gsub('_.*','',dataset)),
-          file=file.path('tables','pseudobulk_tmod.csv'))
+          file=file.path('..','tables','pseudobulk_tmod.csv'))
 ```
 
 the gene set enrichment analysis shows strong difference between healthy and alloHSCT mainly in CD4 T cells (GvHD, allograft rejection, PD-1 signaling)
 
-```{r plot_tmod,fig.width=12,fig.height=6.}
-tmods <- read.csv(file.path('tables','pseudobulk_tmod.csv'),header=1,row.names=1)
+```{r plot_tmod,fig.width=6,fig.height=2.5}
+tmods <- read.csv(file.path('..','tables','pseudobulk_tmod.csv'),header=1,row.names=1)
+titles <- c('REACTOME PD 1 SIGNALING',
+            'KEGG RIBOSOME',
+            'KEGG GRAFT VERSUS HOST DISEASE',
+            'KEGG ANTIGEN PROCESSING AND PRESENTATION',
+            'KEGG ALLOGRAFT REJECTION')
 tmods %>%
-  dplyr::filter(adj.P.Val < 1.e-5, AUC > .7, contrast %in% c('AvsH'),!grepl('MRNA',toupper(Title))) %>% 
+  dplyr::filter(adj.P.Val < 1.e-5, AUC > .7, contrast %in% c('AvsH'),toupper(Title)%in% titles) %>%
   dplyr::group_by(contrast,celltype,Title) %>%
   dplyr::slice_min(adj.P.Val,n=1) %>%
   dplyr::mutate(padj=ifelse(grepl('_up$',dataset),-log10(adj.P.Val),log10(adj.P.Val)),
@@ -1753,11 +1688,14 @@ tmods %>%
   geom_point() + 
   scale_color_gradient2(low='blue3',mid='gray',high='red3',limits=c(-10,10),breaks=c(-10,0,10),
                         labels=c('1e-10 (down)','','1e-10 (up)'),oob=scales::squish) +
+  scale_size_continuous(breaks=c(.6, .7, .8, .9), limits=c(.6,.9)) +
   theme_minimal() + 
   theme(strip.background=element_blank(),
         strip.clip='off',
         axis.text.x=element_text(angle=90,hjust=1,vjust=.5),
-        legend.key.size=unit(3,'mm')) + 
+        legend.position='right',
+        legend.key.size=unit(3,'mm'),
+        legend.spacing=unit(0,'mm')) +
   labs(x='',y='')
 ```
 

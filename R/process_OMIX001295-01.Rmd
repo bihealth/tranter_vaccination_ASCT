@@ -22,7 +22,7 @@ options(future.globals.maxSize = 10 * 1024 * 1024^2)
 we follow the [recent paper](https://zenodo.org/record/7555405) and use their data as reference:
 
 ```{r get_reference, fig.width=6,fig.height=5}
-reference <- readRDS(file.path('R',"PBMC_vaccine_CITE.rds"))
+reference <- readRDS(file.path('..','seurat',"PBMC_vaccine_CITE.rds"))
 ```
 
 load PBMC data from [OMIX001295-01]( https://doi.org/10.1002/jmv.28012); take all cells with less than 10% mitochondrial RNA and between 250 and 5000 genes
@@ -36,7 +36,7 @@ samples <- c(outer(c('NJ-','FJ-','SJ-'),seq(1,6),FUN=paste0))
 
 pbmc <- list()
 for (sample in samples) {
-  dge <- Read10X_h5(file.path('cellranger',paste0(sample,'_filtered_counts.h5')))
+  dge <- Read10X_h5(file.path('..','cellranger',paste0(sample,'_filtered_counts.h5')))
   sobj <- CreateSeuratObject(counts = dge, project=sample)
   sobj[['pct.mito']] <- PercentageFeatureSet(sobj, pattern='^MT-')
   sobj <- subset(sobj, (pct.mito < 10) & (nFeature_RNA <= 5000) & (nFeature_RNA >= 250))
@@ -93,7 +93,7 @@ for (sample in samples) {
 identify and remove putative doublets (shown in pink), and cells with prediction score < .75
 
 ```{r doublets,fig.width=10,fig.height=12}
-source(file.path('R','my_doubletFinder.R'))
+source(file.path('..','R','my_doubletFinder.R'))
 pbmc <- lapply(pbmc, function(sobj) {
   DefaultAssay(sobj) <- 'RNA'
   Idents(sobj) <- 'predicted.celltype.l1'
@@ -123,7 +123,7 @@ pbmc.sub <- lapply(pbmc, function(x) subset(x, subset=(DF.classifications=='Sing
 
 ```{r save}
 for (sample in samples) {
-  saveRDS(pbmc.sub[[sample]], file.path('seurat',paste0(sample,'.rds')))
+  saveRDS(pbmc.sub[[sample]], file.path('..','seurat',paste0(sample,'.rds')))
 }
 ```
 

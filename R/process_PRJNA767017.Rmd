@@ -22,24 +22,22 @@ options(future.globals.maxSize = 10 * 1024 * 1024^2)
 we follow the [recent paper](https://zenodo.org/record/7555405) and use their data as reference:
 
 ```{r get_reference, fig.width=6,fig.height=5}
-reference <- readRDS(file.path('seurat',"PBMC_vaccine_CITE.rds"))
+reference <- readRDS(file.path('..','seurat',"PBMC_vaccine_CITE.rds"))
 ```
 
 load PBMC data from [PRJNA767017](https://insight.jci.org/articles/view/153201); take all cells with less than 10% mitochondrial RNA and between 250 and 5000 genes
 
 - Vacc_pre (4 donors)
 - Vacc_post (4 donors)
-- HCW_base (3 donors)
-- HCW_conv (3 donors)
 
 ```{r get_data}
-samples <- c("Vacc_pre","Vacc_post","HCW_base","HCW_conv")
-ndonors <- c(4,4,3,3)
+samples <- c("Vacc_pre","Vacc_post")
+ndonors <- c(4,4)
 names(ndonors) <- samples
 
 pbmc <- list()
 for (sample in samples) {
-  dge <- Read10X_h5(file.path('cellranger',paste0(sample,'filtered_counts.h5'))
+  dge <- Read10X_h5(file.path('..','cellranger',paste0(sample,'_filtered_counts.h5')))
   sobj <- CreateSeuratObject(counts = dge[['Gene Expression']], project=sample)
   sobj[['pct.mito']] <- PercentageFeatureSet(sobj, pattern='^MT-')
   sobj <- subset(sobj, (pct.mito < 10) & (nFeature_RNA <= 5000) & (nFeature_RNA >= 250))
@@ -49,7 +47,7 @@ for (sample in samples) {
   sobj[["HTO"]] <- CreateAssayObject(counts = dge[['Antibody Capture']][hts,cells,drop=FALSE])
   sobj <- NormalizeData(sobj, normalization.method='CLR', assay='HTO', verbose=FALSE)
   sobj <- HTODemux(sobj, assay='HTO', verbose=FALSE)
-  vireo <- read.table(file.path('vireo',sample,'donor_ids.tsv'),
+  vireo <- read.table(file.path('..','vireo',sample,'donor_ids.tsv'),
                       header=1,row.names=1,as.is=TRUE)
   colnames(vireo) <- paste0('vireo_',colnames(vireo))
   sobj <- AddMetaData(sobj, vireo) 
@@ -109,7 +107,7 @@ for (sample in samples) {
 identify and remove putative doublets (shown in pink), and cells with prediction score < .75
 
 ```{r doublets,fig.width=10,fig.height=12}
-source(file.path('R','my_doubletFinder.R'))
+source(file.path('..','R','my_doubletFinder.R'))
 pbmc <- lapply(pbmc, function(sobj) {
   DefaultAssay(sobj) <- 'RNA'
   Idents(sobj) <- 'predicted.celltype.l1'
@@ -139,7 +137,7 @@ pbmc.sub <- lapply(pbmc, function(x) subset(x, subset=(DF.classifications=='Sing
 
 ```{r save}
 for (sample in samples) {
-  saveRDS(pbmc.sub[[sample]], file.path('seurat',paste0(sample,'.rds')))
+  saveRDS(pbmc.sub[[sample]], file.path('..','seurat',paste0(sample,'.rds')))
 }
 ```
 
