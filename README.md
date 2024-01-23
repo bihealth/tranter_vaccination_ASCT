@@ -2,7 +2,7 @@
 
 ## data access
 
-- processed data is available from NCBI GEO under accession [GSEXXX](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSEXXX)
+- processed data is available from NCBI GEO under accession [GSE253948](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE253948)
 - `PBMC_vaccine_CITE.rds` is available from [Zenodo](https://zenodo.org/records/8240488)
 - processed data for Obermayer et al. is available from NCBI GEO under accession number  [GSE222633](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE222633) 
 - raw data for Sureshchandra et al. are available from SRA under accession number [PRJNA767017](https://www.ncbi.nlm.nih.gov/bioproject/PRJNA767017/)

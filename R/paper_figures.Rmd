@@ -667,9 +667,11 @@ df <- clonalDiversity(tcr_comb[smps], cloneCall='gene',group='sample', exportTab
 ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) + 
   geom_boxplot(outlier.shape=NA,position=position_dodge(width=.5),width=.5) + 
   geom_point(pch=21,fill='white',color='black',position=position_dodge(width=.5),size=2) + 
-  stat_compare_means(aes(group=dataset),label = "p.format", 
+  stat_compare_means(aes(group=dataset),label = "p.signif", 
                      comparisons=list(c('ASCT','HD1'),
                                       c('ASCT','HD2')),
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   theme_classic() +
   #scale_y_log10() +
@@ -707,6 +709,8 @@ ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) +
                                       c('ASCT','HD1'),
                                       c('ASCT','HD2'),
                                       c('ASCT','HD_C')),
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   theme_classic() +
   #scale_y_log10() +
@@ -744,6 +748,8 @@ ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels
   theme_classic() +
   stat_compare_means(aes(group=donor),label = "p.signif",
                      comparisons=list(c('post','pre')),
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   facet_grid(.~dataset, scales='free_x', space='free_x') +
   scale_color_manual(values=dataset_colors,guide=FALSE) +
@@ -1078,6 +1084,8 @@ ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) +
   stat_compare_means(aes(group=dataset),label = "p.signif", 
                      comparisons=list(c('ASCT','HD1'),
                                       c('ASCT','HD2')),
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   theme_classic() +
   #scale_y_log10() +
@@ -1115,6 +1123,8 @@ ggplot(df, aes(x=dataset,y=`Inv.Simpson`,color=dataset)) +
                                       c('ASCT','HD1'),
                                       c('ASCT','HD2'),
                                       c('ASCT','HD_C')),
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   theme_classic() +
   #scale_y_log10() +
@@ -1151,6 +1161,8 @@ ggplot(df %>% dplyr::mutate(stage=factor(ifelse(stage=='T0','pre','post'),levels
   geom_line(aes(group=donor),color='gray',size=.25) +
   theme_classic() +
   stat_compare_means(aes(group=donor),label = "p.signif",
+                     symnum.args=list(cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, Inf), 
+                                      symbols = c("****", "***", "**", "*", "n.s.")),
                      comparisons=list(c('post','pre')),
                      method='wilcox.test',bracket.size=.25,tip.length=.01,size=2) +
   facet_grid(.~dataset, scales='free_x', space='free_x') +
